@@ -120,10 +120,7 @@ mkdir "%LOCAL_DATA_DIR%" >nul 2>nul
 set "VENV_CREATED=0"
 if not exist "%PYTHON_BIN%" (
     echo == Creating Python virtual environment ==
-    call :find_python_launcher
-    if errorlevel 1 exit /b 1
-    mkdir "%VENV_DIR%" >nul 2>nul
-    call %PYTHON_LAUNCHER% -m venv "%VENV_DIR%"
+    call :create_virtual_environment
     if errorlevel 1 exit /b 1
     set "PYTHON_BIN=%DEFAULT_PYTHON_BIN%"
     set "VENV_CREATED=1"
@@ -273,7 +270,8 @@ exit /b %ERRORLEVEL%
 :import_env
 if not exist "%ENV_FILE%" exit /b 0
 for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
-    if not "%%~A"=="" set "%%A=%%B"
+    rem %%~B removes matching outer quotes emitted by the dashboard env writer.
+    if not "%%~A"=="" set "%%A=%%~B"
 )
 exit /b 0
 
@@ -294,6 +292,13 @@ if not defined PYTHON_LAUNCHER (
     exit /b 1
 )
 exit /b 0
+
+:create_virtual_environment
+call :find_python_launcher
+if errorlevel 1 exit /b 1
+mkdir "%VENV_DIR%" >nul 2>nul
+call %PYTHON_LAUNCHER% -m venv "%VENV_DIR%"
+exit /b %ERRORLEVEL%
 
 :install_dependencies
 set "REQ_HASH_FILE=%LOCAL_DATA_DIR%\.requirements.current.sha256"

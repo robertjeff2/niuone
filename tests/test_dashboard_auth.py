@@ -123,7 +123,7 @@ class DashboardAuthTests(unittest.TestCase):
         home = FakeHandler(path='/')
         home.do_GET()
         self.assertEqual(home.status, 200)
-        self.assertIn('<title>牛牛1号</title>', home.wfile.getvalue().decode('utf-8'))
+        self.assertIn('<title>Jeff小助理</title>', home.wfile.getvalue().decode('utf-8'))
 
         admin = FakeHandler(path='/admin')
         admin.do_GET()
@@ -161,11 +161,11 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
         self.assertEqual(admin_js.wfile.getvalue(), (FRONTEND / 'admin.js').read_bytes())
         self.assertEqual(versioned_dashboard_js.wfile.getvalue(), (FRONTEND / 'dashboard.js').read_bytes())
-        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=14">', DASHBOARD_FRONTEND)
-        self.assertIn('<script src="/static/dashboard.js?v=27" defer></script>', DASHBOARD_FRONTEND)
+        self.assertIn('<link rel="stylesheet" href="/static/dashboard.css?v=15" />', DASHBOARD_FRONTEND)
+        self.assertIn('<script src="/static/dashboard.js?v=30" defer></script>', DASHBOARD_FRONTEND)
         self.assertNotIn('document.title', DASHBOARD_FRONTEND)
-        self.assertIn("document.title = '牛牛1号';", ADMIN_FRONTEND)
-        self.assertNotIn("title + ' · 牛牛1号'", ADMIN_FRONTEND)
+        self.assertIn("document.title = 'Jeff小助理';", ADMIN_FRONTEND)
+        self.assertNotIn("title + ' · Jeff小助理'", ADMIN_FRONTEND)
         self.assertEqual(dashboard_js.header('Content-Type'), 'application/javascript; charset=utf-8')
         self.assertIn('max-age=31536000', dashboard_js.header('Cache-Control'))
         self.assertIn('immutable', dashboard_js.header('Cache-Control'))
@@ -364,6 +364,11 @@ class DashboardAuthTests(unittest.TestCase):
         action.do_HEAD()
         self.assertEqual(action.status, 405)
         self.assertEqual(action.header('Allow'), 'POST')
+
+        import_action = FakeHandler(path=dashboard.PRACTICE_HOLDINGS_IMPORT_API_PATH, method='HEAD')
+        import_action.do_HEAD()
+        self.assertEqual(import_action.status, 405)
+        self.assertEqual(import_action.header('Allow'), 'POST')
 
         refresh = FakeHandler(path='/api/practice_candidates/refresh', method='HEAD')
         refresh.do_HEAD()
@@ -718,6 +723,10 @@ class DashboardAuthTests(unittest.TestCase):
             def record_decision_log_entry(self, entry, mark_b1_done=False):
                 calls['entries'].append((entry, mark_b1_done))
 
+            def run_t_assistant_once(self, notify=True):
+                calls['t_assistant_notify'] = notify
+                return {'summary': 'T助手测试'}
+
         original_get_trader = dashboard.get_trader_module
         try:
             dashboard.get_trader_module = lambda: TraderStub()
@@ -731,6 +740,8 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.get_trader_module = original_get_trader
 
         self.assertEqual(result['reason'], 'no_candidates')
+        self.assertEqual(result['t_assistant']['summary'], 'T助手测试')
+        self.assertTrue(calls['t_assistant_notify'])
         self.assertEqual(calls['refresh_payload']['market_snapshot']['sample_count'], 3000)
         entry, mark_done = calls['entries'][0]
         self.assertTrue(mark_done)
@@ -761,11 +772,13 @@ class DashboardAuthTests(unittest.TestCase):
 
         original_scan = dashboard.trigger_b1_scan
         original_decision = dashboard.run_practice_decision_logged
+        original_should_full_scan = dashboard.manual_cycle_should_full_scan
         original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
         original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
         try:
             dashboard.trigger_b1_scan = fake_scan
             dashboard.run_practice_decision_logged = fake_decision
+            dashboard.manual_cycle_should_full_scan = lambda now=None: True
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
 
@@ -802,8 +815,62 @@ class DashboardAuthTests(unittest.TestCase):
             allow_decision_finish.set()
             dashboard.trigger_b1_scan = original_scan
             dashboard.run_practice_decision_logged = original_decision
+            dashboard.manual_cycle_should_full_scan = original_should_full_scan
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+    def test_manual_practice_cycle_scans_holdings_only_outside_full_scan_window(self):
+        calls = []
+
+        class TraderStub:
+            def run_t_assistant_once(self, notify=True, force_notify=False):
+                calls.append(('t_assistant', notify, force_notify))
+                return {
+                    'generated_at': '2026-07-15 19:00:00',
+                    'summary': '持仓分析完成',
+                    'items': [{'code': '600000', 'mode_label': '只观察', 'suggested_shares': 100, 'plan': '等待买卖点'}],
+                }
+
+            def load_state(self):
+                return {'cash': 1000.0, 'positions': {}, 'trade_log': [], 'decision_log': []}
+
+            def enrich_portfolio(self, state):
+                return {'cash': 1000.0, 'total_equity': 1000.0, 'positions': []}
+
+        original_get_trader = dashboard.get_trader_module
+        original_should_full_scan = dashboard.manual_cycle_should_full_scan
+        original_scan = dashboard.trigger_b1_scan
+        original_decision = dashboard.run_practice_decision_logged
+        original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            dashboard.manual_cycle_should_full_scan = lambda now=None: False
+            dashboard.trigger_b1_scan = lambda *args, **kwargs: calls.append(('scan', args, kwargs)) or {}
+            dashboard.run_practice_decision_logged = (
+                lambda payload, record_start=False: calls.append(('decision', payload, record_start))
+                or {'executed': [], 'decision': {'summary': '未成交'}}
+            )
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
+
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK.acquire()
+            dashboard._run_practice_manual_cycle()
+            status = dashboard.practice_manual_cycle_status()
+        finally:
+            dashboard.get_trader_module = original_get_trader
+            dashboard.manual_cycle_should_full_scan = original_should_full_scan
+            dashboard.trigger_b1_scan = original_scan
+            dashboard.run_practice_decision_logged = original_decision
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertEqual(status['stage'], 'completed')
+        self.assertEqual(status['candidate_count'], 0)
+        self.assertEqual(status['decision_result']['reason'], 'holdings_only')
+        self.assertIn(('t_assistant', True, True), calls)
+        self.assertFalse(any(call and call[0] == 'scan' for call in calls))
+        self.assertFalse(any(call and call[0] == 'decision' for call in calls))
 
     def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
         class TraderStub:
@@ -1471,8 +1538,15 @@ console.log(JSON.stringify(result));
         self.assertNotIn("fetchJson('/api/b1_screen')", DASHBOARD_FRONTEND)
         self.assertNotIn("actionFetch('/api/b1_screen/trigger')", DASHBOARD_FRONTEND)
         self.assertIn("actionFetch('/api/niuniu_practice/manual-cycle')", DASHBOARD_FRONTEND)
+        self.assertIn("actionFetch('/api/niuniu_practice/holdings/import'", DASHBOARD_FRONTEND)
+        self.assertIn('导入当前持仓', DASHBOARD_FRONTEND)
+        self.assertIn('编辑持仓', DASHBOARD_FRONTEND)
+        self.assertIn('仅 T 助手（推荐）', DASHBOARD_FRONTEND)
+        self.assertIn('management_mode: practiceImportManagementMode', DASHBOARD_FRONTEND)
+        self.assertIn('position-management-badge', DASHBOARD_FRONTEND)
+        self.assertIn('function openPracticeEditDialog()', DASHBOARD_FRONTEND)
         self.assertIn("fetch('/api/niuniu_practice/manual-cycle', {cache:'no-store'})", DASHBOARD_FRONTEND)
-        self.assertIn('手动触发选股及买卖策略', DASHBOARD_FRONTEND)
+        self.assertIn('手动分析持仓 / 盘中全量选股', DASHBOARD_FRONTEND)
         self.assertIn('盘面评价 · ${esc(marketContext.tone_label', DASHBOARD_FRONTEND)
         self.assertIn('let practiceMarketSummaryExpanded = false;', DASHBOARD_FRONTEND)
         self.assertIn('class="practice-market-summary-card ${expanded ? \'open\' : \'collapsed\'}', DASHBOARD_FRONTEND)
@@ -1960,6 +2034,29 @@ process.stdout.write(JSON.stringify({
             dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
             dashboard.B1_CACHE_FILE = original_b1_cache_file
 
+    def test_practice_candidates_cache_reads_legacy_gbk_files(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            payload = {
+                'items': [{'code': '000001', 'name': '\u725b'}],
+                'generated_at': '2026-07-16 10:00:00',
+            }
+            dashboard.MULTI_STRATEGY_CACHE_FILE.write_bytes(
+                json.dumps(payload, ensure_ascii=False).encode('gbk')
+            )
+
+            cached = dashboard.load_practice_candidates_cache()
+            self.assertNotIn('error', cached)
+            self.assertEqual(cached['items'], [{'code': '000001', 'name': '\u725b'}])
+            self.assertEqual(cached['count'], 1)
+            self.assertEqual(cached['generated_at'], '2026-07-16 10:00:00')
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+
     def test_practice_candidates_api_uses_canonical_cache_for_legacy_alias(self):
         original_loader = dashboard.load_practice_candidates_cache
         calls = []
@@ -2209,6 +2306,66 @@ process.stdout.write(JSON.stringify({
             dashboard.generate_practice_market_summary = original_generate
             dashboard.RATE_LIMIT_ADMIN = original_admin_limit
 
+    def test_practice_holdings_import_requires_admin_action_and_clears_cache(self):
+        original_get_trader = dashboard.get_trader_module
+        original_admin_limit = dashboard.RATE_LIMIT_ADMIN
+        calls = []
+
+        class TraderStub:
+            def import_current_holdings(
+                self, text, *, mode='merge', cash='', initial_cash='', source_note='', management_mode='t_assistant',
+            ):
+                calls.append((text, mode, cash, initial_cash, source_note, management_mode))
+                return {'ok': True, 'imported': 1, 'portfolio': {'positions': [{'code': '600000'}]}}
+
+        try:
+            dashboard.RATE_LIMIT_ADMIN = 100
+            dashboard.get_trader_module = lambda: TraderStub()
+            dashboard.API_RESPONSE_CACHE['niuniu_practice'] = {'ts': 1, 'payload': b'old'}
+            dashboard.API_RESPONSE_CACHE[dashboard.PRACTICE_FAST_CACHE_KEY] = {'ts': 1, 'payload': b'old'}
+            body = urllib.parse.urlencode({
+                'positions_text': 'code,qty,avg_cost\n600000,1000,8.5',
+                'mode': 'replace',
+                'cash': '12345',
+                'initial_cash': '20000',
+                'management_mode': 't_assistant',
+            }).encode('utf-8')
+
+            missing_header = FakeHandler(
+                path=dashboard.PRACTICE_HOLDINGS_IMPORT_API_PATH,
+                method='POST',
+                headers={'Content-Length': str(len(body)), 'Cookie': self.admin_cookie()},
+                body=body,
+            )
+            missing_header.do_POST()
+            self.assertEqual(missing_header.status, 403)
+            self.assertEqual(calls, [])
+
+            imported = FakeHandler(
+                path=dashboard.PRACTICE_HOLDINGS_IMPORT_API_PATH,
+                method='POST',
+                headers={
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            imported.do_POST()
+            payload = json.loads(imported.wfile.getvalue().decode('utf-8'))
+        finally:
+            dashboard.get_trader_module = original_get_trader
+            dashboard.RATE_LIMIT_ADMIN = original_admin_limit
+
+        self.assertEqual(imported.status, 200)
+        self.assertEqual(payload['imported'], 1)
+        self.assertEqual(
+            calls,
+            [('code,qty,avg_cost\n600000,1000,8.5', 'replace', '12345', '20000', '', 't_assistant')],
+        )
+        self.assertNotIn('niuniu_practice', dashboard.API_RESPONSE_CACHE)
+        self.assertNotIn(dashboard.PRACTICE_FAST_CACHE_KEY, dashboard.API_RESPONSE_CACHE)
+
     def test_notification_test_api_has_dedicated_rate_limit_and_body_limit(self):
         original_sender = dashboard.send_notification_test
         original_admin_limit = dashboard.RATE_LIMIT_ADMIN
@@ -2419,9 +2576,15 @@ process.stdout.write(JSON.stringify({
         strategy_group = next(group for group in groups if group['slug'] == 'stock-strategy')
         self.assertEqual(strategy_group['name'], '选股与交易策略')
         decision_names = dashboard.admin_setting_group_env_names('decision-times')
+        self.assertIn('DASHBOARD_T_ASSISTANT_MODEL_ENABLED', decision_names)
+        self.assertIn('DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS', decision_names)
+        self.assertIn('DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS', decision_names)
+        self.assertIn('DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE', decision_names)
         self.assertIn('DASHBOARD_DISPLAY_CANDIDATE_LIMIT', decision_names)
         self.assertIn('DASHBOARD_TRADE_CANDIDATE_LIMIT', decision_names)
         self.assertIn('DASHBOARD_STOCK_UNIVERSE', decision_names)
+        self.assertIn('DASHBOARD_T_ASSISTANT_ENABLED', decision_names)
+        self.assertIn('DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS', decision_names)
         config_by_name = {item['name']: item for item in dashboard.ENV_CONFIG_SCHEMA}
         self.assertEqual(config_by_name['DASHBOARD_DISPLAY_CANDIDATE_LIMIT']['default'], '10')
         self.assertEqual(config_by_name['DASHBOARD_TRADE_CANDIDATE_LIMIT']['default'], '10')
@@ -2460,6 +2623,7 @@ process.stdout.write(JSON.stringify({
                 'DASHBOARD_MAX_TOTAL_POSITION_PCT',
                 'DASHBOARD_MIN_CASH_RESERVE_PCT',
                 'DASHBOARD_MORNING_MAX_OPEN_POSITIONS',
+                'DASHBOARD_INITIAL_CASH',
             },
         )
         self.assertNotIn('DASHBOARD_TRADE_DISCIPLINE_TEXT', decision_model_names)
@@ -2950,6 +3114,32 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(parsed['DASHBOARD_PORT'], '9000')
         self.assertEqual(parsed['US_RATING_API_KEY'], 'old-secret')
         self.assertEqual(parsed['EXTRA_VALUE'], 'hello world')
+
+    def test_env_config_preserves_unquoted_windows_paths(self):
+        original_env_file = dashboard.DASHBOARD_ENV_FILE
+        try:
+            dashboard.DASHBOARD_ENV_FILE = self.tmp_path / 'dashboard.env'
+            expected_home = r'D:\niuone\.local-data\runtime'
+            expected_trader = r'D:\niuone\app\entrypoints\niuniu_practice_trader.py'
+            dashboard.DASHBOARD_ENV_FILE.write_text(
+                f'DASHBOARD_HOME={expected_home}\n'
+                f'DASHBOARD_TRADER_SCRIPT={expected_trader}\n'
+                'DASHBOARD_PORT=8787\n',
+                encoding='utf-8',
+            )
+
+            parsed_before = dashboard.parse_env_file(dashboard.DASHBOARD_ENV_FILE)
+            dashboard.write_env_file_values({'DASHBOARD_PORT': '9000'})
+            parsed_after = dashboard.parse_env_file(dashboard.DASHBOARD_ENV_FILE)
+            serialized = dashboard.DASHBOARD_ENV_FILE.read_text(encoding='utf-8')
+        finally:
+            dashboard.DASHBOARD_ENV_FILE = original_env_file
+
+        self.assertEqual(parsed_before['DASHBOARD_HOME'], expected_home)
+        self.assertEqual(parsed_before['DASHBOARD_TRADER_SCRIPT'], expected_trader)
+        self.assertEqual(parsed_after['DASHBOARD_HOME'], expected_home)
+        self.assertEqual(parsed_after['DASHBOARD_TRADER_SCRIPT'], expected_trader)
+        self.assertIn(f'DASHBOARD_TRADER_SCRIPT="{expected_trader}"', serialized)
 
     def test_env_config_write_reports_no_change(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE

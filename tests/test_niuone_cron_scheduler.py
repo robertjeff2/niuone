@@ -107,6 +107,16 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.normalize_job_expr(job, "08:00"), "0 8 * * 1-5")
         self.assertTrue(scheduler.job_enabled(job, {}))
 
+    def test_holdings_analysis_job_runs_without_full_market_scan(self):
+        scheduler = load_scheduler_module()
+        job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_HOLDINGS_ANALYSIS_CRON")
+
+        self.assertEqual(job.default_expr, "45 9,10,11,13,14 * * 1-5")
+        self.assertEqual(job.command, ("niuniu_practice_trader.py", "--holdings-analysis"))
+        self.assertTrue(scheduler.cron_matches(job.default_expr, datetime(2026, 7, 15, 10, 45, tzinfo=scheduler.CN_TZ)))
+        self.assertFalse(scheduler.cron_matches(job.default_expr, datetime(2026, 7, 15, 12, 45, tzinfo=scheduler.CN_TZ)))
+        self.assertTrue(scheduler.job_enabled(job, {}))
+
     def test_time_exit_job_uses_hhmm_setting(self):
         scheduler = load_scheduler_module()
         b3_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_B3_EXIT_TIME")

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """NiuOne dashboard for messages, models, and trading signals."""
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ B1_SCHEDULE_TIMES = tuple(
     value.strip()
     for value in os.environ.get(
         "DASHBOARD_B1_SCHEDULE_TIMES",
-        "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50",
+        "10:00,14:50",
     ).split(",")
     if value.strip()
 )
@@ -166,6 +166,8 @@ B1_SCHEDULE_LOCK = threading.RLock()
 B1_SCHEDULE_THREAD: threading.Thread | None = None
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
+T_ASSISTANT_THREAD: threading.Thread | None = None
+T_ASSISTANT_POLL_SECONDS = float(os.environ.get("DASHBOARD_T_ASSISTANT_POLL_SECONDS", "300") or "300")
 B1_CANDIDATE_REFRESH_LOCK = threading.Lock()
 B1_CANDIDATE_REFRESH_MIN_SECONDS = float(os.environ.get("DASHBOARD_B1_CANDIDATE_REFRESH_MIN_SECONDS", "0") or "0")
 B1_CANDIDATE_REFRESH_LAST_TS = 0.0
@@ -232,6 +234,7 @@ PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_
 PRACTICE_CANDIDATES_REFRESH_API_PATHS = frozenset({"/api/practice_candidates/refresh", "/api/b1_screen/trigger"})
 PRACTICE_MANUAL_CYCLE_API_PATH = "/api/niuniu_practice/manual-cycle"
 PRACTICE_MARKET_SUMMARY_API_PATH = "/api/niuniu_practice/market-summary"
+PRACTICE_HOLDINGS_IMPORT_API_PATH = "/api/niuniu_practice/holdings/import"
 PRACTICE_MARKET_SUMMARY_FILE = CRON_OUTPUT_DIR / "practice_market_summary_latest.json"
 API_TTLS = {
     "messages": 10,
@@ -266,6 +269,10 @@ DEFAULT_MODEL_CONTEXT_LENGTH = "128000"
 DEFAULT_MODEL_MAX_TOKENS = "4096"
 
 ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
+    {'name': 'DASHBOARD_T_ASSISTANT_MODEL_ENABLED', 'label': '启用T助手大模型复核', 'group': '选股与买卖设置', 'kind': 'bool', 'default': '1', 'effect': 'next_run'},
+    {'name': 'DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS', 'label': 'T助手模型最大输出长度', 'group': '选股与买卖设置', 'kind': 'max_tokens', 'default': '1800', 'effect': 'next_run'},
+    {'name': 'DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS', 'label': 'T助手模型超时秒数', 'group': '选股与买卖设置', 'kind': 'int', 'default': '90', 'effect': 'next_run'},
+    {'name': 'DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE', 'label': 'T助手模型最低置信度', 'group': '选股与买卖设置', 'kind': 'text', 'default': '0.65', 'effect': 'next_run'},
     {"name": "DASHBOARD_HOME", "label": "运行数据目录", "group": "基础路径", "kind": "path", "default": str(LOCAL_DATA_DIR / "runtime"), "effect": "restart"},
     {"name": "DASHBOARD_HOST", "label": "监听地址", "group": "基础路径", "kind": "text", "default": "127.0.0.1", "effect": "restart"},
     {"name": "DASHBOARD_PORT", "label": "监听端口", "group": "基础路径", "kind": "int", "default": "8787", "effect": "restart"},
@@ -296,7 +303,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时选股", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
-    {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "选股及买卖决策时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50", "effect": "runtime"},
+    {"name": "DASHBOARD_B1_SCHEDULE_TIMES", "label": "全量选股时间点", "group": "选股与买卖设置", "kind": "time_list", "default": "10:00,14:50", "effect": "runtime"},
     {"name": STOCK_UNIVERSE_ENV, "label": "选股范围", "group": "选股与买卖设置", "kind": "stock_universe", "default": DEFAULT_STOCK_UNIVERSE, "effect": "runtime"},
     {"name": "DASHBOARD_DISPLAY_CANDIDATE_LIMIT", "label": "候选池展示数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_TRADE_CANDIDATE_LIMIT", "label": "买卖决策候选数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
@@ -310,6 +317,9 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_CRON_MAX_ATTEMPTS", "label": "Cron 失败最大运行次数", "group": "任务调度", "kind": "int", "default": "2", "effect": "next_run"},
     {"name": "DASHBOARD_CRON_RETRY_DELAY_SECONDS", "label": "Cron 失败重试间隔秒数", "group": "任务调度", "kind": "int", "default": "300", "effect": "next_run"},
     {"name": "DASHBOARD_PENDING_DECISION_POLL_SECONDS", "label": "延迟成交检查秒数", "group": "任务调度", "kind": "int", "default": "5", "effect": "restart"},
+    {"name": "DASHBOARD_T_ASSISTANT_POLL_SECONDS", "label": "持仓T助手轮询秒数", "group": "任务调度", "kind": "int", "default": "300", "effect": "restart"},
+    {"name": "DASHBOARD_T_ASSISTANT_ENABLED", "label": "启用持仓T助手推送", "group": "选股与买卖设置", "kind": "bool", "default": "1", "effect": "restart"},
+    {"name": "DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS", "label": "持仓T助手推送冷却秒数", "group": "选股与买卖设置", "kind": "int", "default": "600", "effect": "restart"},
 
     {"name": "DASHBOARD_DECISION_MAX_TOKENS", "label": "决策最大输出长度", "group": "买卖决策模型", "kind": "max_tokens", "default": DEFAULT_MODEL_MAX_TOKENS, "effect": "next_run"},
     {"name": "DASHBOARD_DECISION_TIMEOUT", "label": "决策请求超时", "group": "买卖决策模型", "kind": "int", "default": "180", "effect": "next_run"},
@@ -323,6 +333,7 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_MAX_SINGLE_POSITION_PCT", "label": "单票仓位参考%", "group": "交易规则与风控", "kind": "text", "default": "10", "effect": "next_run"},
     {"name": "DASHBOARD_MAX_TOTAL_POSITION_PCT", "label": "总仓位参考%", "group": "交易规则与风控", "kind": "text", "default": "80", "effect": "next_run"},
     {"name": "DASHBOARD_MIN_CASH_RESERVE_PCT", "label": "现金缓冲参考%", "group": "交易规则与风控", "kind": "text", "default": "20", "effect": "next_run"},
+    {"name": "DASHBOARD_INITIAL_CASH", "label": "新账户默认初始资金", "group": "交易规则与风控", "kind": "text", "default": "1000000", "effect": "restart"},
     {"name": "DASHBOARD_MORNING_MAX_OPEN_POSITIONS", "label": "午盘前持仓上限", "group": "交易规则与风控", "kind": "int", "default": "3", "effect": "next_run"},
 
     {"name": "DASHBOARD_NOTIFICATION_ENABLED", "label": "启用模拟成交通知", "group": "交易通知", "kind": "bool", "default": "0", "effect": "runtime"},
@@ -442,6 +453,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_MAX_SINGLE_POSITION_PCT",
     "DASHBOARD_MAX_TOTAL_POSITION_PCT",
     "DASHBOARD_MIN_CASH_RESERVE_PCT",
+    "DASHBOARD_INITIAL_CASH",
     "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
     "DASHBOARD_NOTIFICATION_ENABLED",
     "DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS",
@@ -457,9 +469,15 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_TELEGRAM_BOT_TOKEN",
     "DASHBOARD_TELEGRAM_CHAT_ID",
     "DASHBOARD_B1_SCHEDULE_TIMES",
+    'DASHBOARD_T_ASSISTANT_MODEL_ENABLED',
+    'DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS',
+    'DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS',
+    'DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE',
     STOCK_UNIVERSE_ENV,
     "DASHBOARD_DISPLAY_CANDIDATE_LIMIT",
     "DASHBOARD_TRADE_CANDIDATE_LIMIT",
+    "DASHBOARD_T_ASSISTANT_ENABLED",
+    "DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     ACTIVE_STRATEGY_ENV,
@@ -480,10 +498,15 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "X_WATCHLIST_MAX_TOKENS",
     "DASHBOARD_CRON_MAX_ATTEMPTS",
     "DASHBOARD_CRON_RETRY_DELAY_SECONDS",
+    "DASHBOARD_T_ASSISTANT_POLL_SECONDS",
     "DASHBOARD_INDICES_TTL_SECONDS",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
     STOCK_UNIVERSE_ENV,
+    'DASHBOARD_T_ASSISTANT_MODEL_ENABLED',
+    'DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS',
+    'DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS',
+    'DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE',
     "DASHBOARD_NEWS_MODEL",
     "DASHBOARD_NEWS_CONTEXT_LENGTH",
     "DASHBOARD_NEWS_MAX_TOKENS",
@@ -508,10 +531,13 @@ TRADER_RUNTIME_ENV_NAMES = {
     "DASHBOARD_MAX_SINGLE_POSITION_PCT",
     "DASHBOARD_MAX_TOTAL_POSITION_PCT",
     "DASHBOARD_MIN_CASH_RESERVE_PCT",
+    "DASHBOARD_INITIAL_CASH",
     "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
     "DASHBOARD_TIME_STOP_EXIT_TIME",
+    "DASHBOARD_T_ASSISTANT_ENABLED",
+    "DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS",
     STRATEGY_SOURCE_ENV,
     PERSONA_STRATEGY_ENV,
     ACTIVE_STRATEGY_ENV,
@@ -1197,6 +1223,21 @@ def run_practice_decision(b1_payload: dict[str, Any]) -> dict[str, Any]:
     return get_trader_module().run_decision_after_b1(b1_payload)
 
 
+def read_json_file_compat(path: Path) -> Any:
+    raw = path.read_bytes()
+    last_decode_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            last_decode_error = exc
+            continue
+        return json.loads(text)
+    if last_decode_error is not None:
+        raise last_decode_error
+    return json.loads(raw.decode("utf-8"))
+
+
 def _tencent_key_for_code(code: str) -> str:
     code = str(code or "").strip()
     return ("sh" if code.startswith(("6", "9")) else "sz") + code
@@ -1206,7 +1247,7 @@ def b1_cache_has_newer_generation(base_payload: dict[str, Any]) -> bool:
     try:
         if not B1_CACHE_FILE.exists():
             return False
-        latest = json.loads(B1_CACHE_FILE.read_text())
+        latest = read_json_file_compat(B1_CACHE_FILE)
     except Exception:
         return False
     latest_generated = str(latest.get("generated_at") or "")[:19]
@@ -1231,7 +1272,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         if not B1_CACHE_FILE.exists():
             return {"skipped": True, "reason": "missing_cache"}
         try:
-            parsed = json.loads(B1_CACHE_FILE.read_text())
+            parsed = read_json_file_compat(B1_CACHE_FILE)
         except Exception as exc:
             return {"skipped": True, "reason": f"bad_cache:{type(exc).__name__}"}
         items = parsed.get("items") or parsed.get("candidates") or []
@@ -1244,8 +1285,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             parsed["candidates"] = []
             parsed["count"] = 0
             parsed["refreshed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            B1_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False))
-            MULTI_STRATEGY_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False, indent=2))
+            B1_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
+            MULTI_STRATEGY_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
             B1_CANDIDATE_REFRESH_LAST_TS = time.time()
             return {"updated": 0, "count": 0}
 
@@ -1348,8 +1389,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             "refreshed_at": refreshed_at,
         }
         json_text = json.dumps(output, ensure_ascii=False, indent=2)
-        B1_CACHE_FILE.write_text(json_text + "\n")
-        MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n")
+        B1_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
+        MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         B1_CANDIDATE_REFRESH_LAST_TS = time.time()
@@ -1424,7 +1465,18 @@ def run_practice_decision_logged(b1_payload: dict[str, Any], *, record_start: bo
             f"选股完成{slot_note}：0只候选",
             mark_b1_done=True,
         )
-        return {"skipped": True, "reason": "no_candidates"}
+        t_assistant = {}
+        try:
+            trader = get_trader_module()
+            if hasattr(trader, "run_t_assistant_once"):
+                t_assistant = trader.run_t_assistant_once(notify=True)
+                with API_RESPONSE_LOCK:
+                    API_RESPONSE_CACHE.pop("niuniu_practice", None)
+                    API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
+        except Exception as exc:
+            print(f"[WARN] 持仓T助手执行失败: {type(exc).__name__}: {exc}", flush=True)
+            t_assistant = {"error": f"{type(exc).__name__}: {exc}"}
+        return {"skipped": True, "reason": "no_candidates", "t_assistant": t_assistant}
     if record_start:
         record_practice_decision_event(
             payload,
@@ -1468,7 +1520,7 @@ def load_practice_candidates_cache() -> dict[str, Any]:
         try:
             if not cache_file.exists():
                 continue
-            parsed = json.loads(cache_file.read_text(encoding="utf-8"))
+            parsed = read_json_file_compat(cache_file)
             if not isinstance(parsed, dict):
                 raise ValueError(f"候选缓存格式无效：{cache_file}")
             items = parsed.get("items") or parsed.get("candidates") or []
@@ -1517,7 +1569,7 @@ def trigger_b1_scan(
                      "running": False, "error": "", "cooldown_remaining_seconds": 0,
                      **schedule_meta}
             with B1_CANDIDATE_REFRESH_LOCK:
-                B1_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False))
+                B1_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
             if decision_mode == "sync":
                 cache["decision_result"] = run_practice_decision_logged(cache, record_start=True)
             elif decision_mode == "async":
@@ -1541,9 +1593,71 @@ def _set_practice_manual_cycle_state(**updates: Any) -> dict[str, Any]:
         return dict(PRACTICE_MANUAL_CYCLE_STATE)
 
 
+def manual_cycle_should_full_scan(now: datetime | None = None) -> bool:
+    """Only full-scan the market during executable A-share windows."""
+    now = now or datetime.now()
+    try:
+        trader = get_trader_module()
+        if hasattr(trader, "is_a_share_execution_time"):
+            return bool(trader.is_a_share_execution_time(now)[0])
+    except Exception:
+        pass
+    minute = now.hour * 60 + now.minute
+    return (9 * 60 + 30 <= minute <= 11 * 60 + 30) or (13 * 60 <= minute <= 15 * 60)
+
+
+def run_manual_holdings_analysis() -> dict[str, Any]:
+    """Analyze current holdings only; no all-market candidate scan."""
+    trader = get_trader_module()
+    assessment = trader.run_t_assistant_once(notify=True, force_notify=True)
+    try:
+        portfolio = trader.enrich_portfolio(trader.load_state())
+    except Exception:
+        portfolio = {}
+    actions = [
+        {
+            "action": "HOLD",
+            "code": item.get("code"),
+            "shares": item.get("suggested_shares") or 0,
+            "reason": f"{item.get('mode_label') or '持仓观察'}：{item.get('plan') or item.get('trigger') or ''}".strip(),
+        }
+        for item in (assessment.get("items") or [])[:5]
+        if isinstance(item, dict)
+    ]
+    return {
+        "skipped": True,
+        "reason": "holdings_only",
+        "executed": [],
+        "portfolio": portfolio,
+        "t_assistant": assessment,
+        "decision": {
+            "summary": "平时仅扫描当前持仓，分析买卖点/倒T/风控，不做全量选股。",
+            "actions": actions,
+            "model": "SYSTEM_HOLDINGS_ASSISTANT",
+            "provider": "local_rule",
+            "t_assistant": assessment,
+        },
+    }
+
+
 def _run_practice_manual_cycle() -> None:
     try:
-        _set_practice_manual_cycle_state(stage="screening", stage_label="正在选股并生成盘面评价")
+        if not manual_cycle_should_full_scan():
+            _set_practice_manual_cycle_state(stage="holdings", stage_label="正在扫描当前持仓并分析买卖点")
+            decision_result = run_manual_holdings_analysis()
+            _set_practice_manual_cycle_state(
+                running=False,
+                stage="completed",
+                stage_label="持仓分析已完成",
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                decision_result=decision_result,
+                candidate_count=0,
+                generated_at=str(decision_result.get("t_assistant", {}).get("generated_at") or ""),
+                error="",
+            )
+            return
+
+        _set_practice_manual_cycle_state(stage="screening", stage_label="正在全量选股并生成盘面评价")
         cache = trigger_b1_scan(force=True, decision_mode="none")
         if cache.get("error"):
             raise RuntimeError(str(cache.get("error")))
@@ -1555,6 +1669,12 @@ def _run_practice_manual_cycle() -> None:
             generated_at=str(cache.get("generated_at") or ""),
         )
         decision_result = run_practice_decision_logged(cache, record_start=True)
+        try:
+            trader = get_trader_module()
+            if hasattr(trader, "notify_manual_practice_cycle_result_safely"):
+                trader.notify_manual_practice_cycle_result_safely(decision_result)
+        except Exception as notify_exc:
+            print(f"[WARN] 手动试仓结果通知失败: {type(notify_exc).__name__}: {notify_exc}", flush=True)
         _set_practice_manual_cycle_state(
             running=False,
             stage="completed",
@@ -1603,7 +1723,7 @@ def b1_cache_generated_for_slot(slot_key: str) -> bool:
     try:
         if not B1_CACHE_FILE.exists():
             return False
-        generated_at = (json.loads(B1_CACHE_FILE.read_text()).get("generated_at") or "")[:16]
+        generated_at = (read_json_file_compat(B1_CACHE_FILE).get("generated_at") or "")[:16]
         return generated_at == slot_key
     except Exception:
         return False
@@ -1823,6 +1943,35 @@ def start_pending_decision_executor() -> None:
     PENDING_DECISION_THREAD = threading.Thread(target=pending_decision_loop, name="practice-pending-decision", daemon=True)
     PENDING_DECISION_THREAD.start()
     print(f"Practice pending decision executor enabled: {PENDING_DECISION_POLL_SECONDS:g}s", flush=True)
+
+
+def t_assistant_loop() -> None:
+    while True:
+        try:
+            trader = get_trader_module()
+            if hasattr(trader, "run_t_assistant_once"):
+                result = trader.run_t_assistant_once(notify=True)
+                notify = result.get("notify") if isinstance(result, dict) else {}
+                if isinstance(notify, dict) and notify.get("notified"):
+                    print(
+                        f"[practice T assistant] {result.get('summary') or ''}",
+                        flush=True,
+                    )
+                    with API_RESPONSE_LOCK:
+                        API_RESPONSE_CACHE.pop("niuniu_practice", None)
+                        API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
+        except Exception as exc:
+            print(f"[WARN] 持仓T助手轮询失败: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(max(60.0, T_ASSISTANT_POLL_SECONDS))
+
+
+def start_t_assistant_executor() -> None:
+    global T_ASSISTANT_THREAD
+    if T_ASSISTANT_THREAD and T_ASSISTANT_THREAD.is_alive():
+        return
+    T_ASSISTANT_THREAD = threading.Thread(target=t_assistant_loop, name="practice-t-assistant", daemon=True)
+    T_ASSISTANT_THREAD.start()
+    print(f"Practice T assistant enabled: {T_ASSISTANT_POLL_SECONDS:g}s", flush=True)
 
 
 def start_b1_scheduler() -> None:
@@ -2227,6 +2376,14 @@ def parse_env_file(path: Path | None = None, *, include_container_overrides: boo
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             continue
         raw_value = raw_value.strip()
+        # ``run.bat`` writes absolute Windows paths without shell quoting on the
+        # first run.  POSIX shlex treats every backslash in such a value as an
+        # escape and turns ``D:\\niuone\\app`` into ``D:niuoneapp``.  Preserve
+        # native drive and UNC paths verbatim; values written by the dashboard
+        # itself are quoted and remain compatible with the normal parser below.
+        if re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", raw_value):
+            values[key] = raw_value
+            continue
         try:
             parsed = shlex.split(raw_value, posix=True)
             values[key] = parsed[0] if parsed else ""
@@ -2258,6 +2415,10 @@ def admin_visible_env_names(env_values: dict[str, str] | None = None) -> list[st
 
 def quote_env_value(value: str) -> str:
     value = str(value or "")
+    # Double-quoted drive paths work in both POSIX env readers and run.bat;
+    # batch files do not treat single quotes as quoting characters.
+    if re.fullmatch(r"[A-Za-z]:[\\/][^\"\r\n]*", value):
+        return '"' + value + '"'
     if value and re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
@@ -3305,7 +3466,7 @@ def send_notification_test(
 
         notification = Notification(
             event_type="notification.test",
-            title="牛牛1号通知测试",
+            title="Jeff小助理通知测试",
             text=(
                 f"{label} 渠道配置验证消息。\n模拟成交，非实盘。\n"
                 f"发送时间：{datetime.now(CN_TZ).strftime('%Y-%m-%d %H:%M:%S')}（北京时间）\n"
@@ -3734,7 +3895,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {PRACTICE_MANUAL_CYCLE_API_PATH, PRACTICE_MARKET_SUMMARY_API_PATH, "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
+        if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS | {PRACTICE_MANUAL_CYCLE_API_PATH, PRACTICE_MARKET_SUMMARY_API_PATH, PRACTICE_HOLDINGS_IMPORT_API_PATH, "/api/niuniu_practice/resume", "/api/self_optimize/apply"}:
             self.send_response(405)
             self.send_header("Allow", "POST")
             self.send_header("Cache-Control", "no-store")
@@ -4008,6 +4169,37 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json_uncached(result)
             else:
                 self.send_json_error(409, str(result.get("error") or "盘面总结生成失败"))
+            return
+        if parsed.path == PRACTICE_HOLDINGS_IMPORT_API_PATH:
+            if not self.require_admin():
+                return
+            if not self.require_action_request():
+                return
+            if not self.enforce_rate_limit("admin", self.client_ip(), RATE_LIMIT_ADMIN):
+                return
+            try:
+                form = self.read_form()
+                result = get_trader_module().import_current_holdings(
+                    form.get("positions_text", ""),
+                    mode=form.get("mode", "merge"),
+                    cash=form.get("cash", ""),
+                    initial_cash=form.get("initial_cash", ""),
+                    source_note=form.get("source_note", ""),
+                    management_mode=form.get("management_mode", "t_assistant"),
+                )
+            except RequestTooLarge:
+                self.send_json_error(413, "请求过大，请重新提交")
+                return
+            except ValueError as exc:
+                self.send_json_error(400, str(exc))
+                return
+            except Exception as exc:
+                self.send_json_error(500, f"{type(exc).__name__}: {exc}")
+                return
+            with API_RESPONSE_LOCK:
+                API_RESPONSE_CACHE.pop("niuniu_practice", None)
+                API_RESPONSE_CACHE.pop(PRACTICE_FAST_CACHE_KEY, None)
+            self.send_json_uncached(result)
             return
         if parsed.path in PRACTICE_CANDIDATES_REFRESH_API_PATHS or legacy_force_path:
             params = parse_qs(parsed.query)
@@ -4316,7 +4508,8 @@ def main() -> None:
     server = ReusableThreadingHTTPServer((args.host, args.port), Handler)
     start_b1_scheduler()
     start_pending_decision_executor()
-    print(f"牛牛1号：http://{args.host}:{args.port}")
+    start_t_assistant_executor()
+    print(f"Jeff小助理：http://{args.host}:{args.port}")
     if ADMIN_PASSWORD:
         print("设置页：/admin（管理员密码保护已启用）")
     else:

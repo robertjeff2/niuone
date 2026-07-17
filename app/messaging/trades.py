@@ -102,7 +102,7 @@ def _trade_notification(trades: Iterable[Mapping[str, Any]]) -> Notification | N
     count = len(normalized)
     return Notification(
         event_type="trade.executed",
-        title=f"牛牛1号模拟成交（{count}笔）",
+        title=f"Jeff小助理模拟成交（{count}笔）",
         text="\n".join(lines),
         metadata={"trade_count": count, "actions": tuple(actions)},
     )

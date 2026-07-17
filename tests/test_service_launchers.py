@@ -35,10 +35,14 @@ class ServiceLauncherTests(unittest.TestCase):
         self.assertIn("manage-long-running.ps1", launcher)
         for task_name in ("NiuOne Dashboard", "NiuOne Cron Scheduler", "NiuOne X Watchlist"):
             self.assertIn(task_name, manager)
+        self.assertIn("Test-NiuOneAdministrator", manager)
+        self.assertIn("-Verb RunAs", manager)
+        self.assertIn("Administrator permission was not granted", manager)
         for service_name in ("dashboard", "cron-scheduler", "x-watchlist"):
             self.assertIn(service_name, runner)
         self.assertIn("NIUONE_LOCAL_DATA_DIR", runner)
         self.assertIn("DASHBOARD_ENV_FILE", runner)
+        self.assertIn('set "%%A=%%~B"', launcher)
 
 
 if __name__ == "__main__":

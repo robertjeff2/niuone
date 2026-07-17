@@ -13,6 +13,8 @@ Rules implemented:
 from __future__ import annotations
 
 import concurrent.futures
+import csv
+import io
 import json
 import math
 import os
@@ -167,6 +169,11 @@ def load_dashboard_env() -> None:
         "DASHBOARD_DECISION_INTELLIGENCE_ENABLED",
         "DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS",
         "DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS",
+        "DASHBOARD_T_ASSISTANT_ENABLED",
+        "DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS",
+        "DASHBOARD_T_ASSISTANT_MIN_CHANGE_BUCKET_PCT",
+        "DASHBOARD_HOLDINGS_ANALYSIS_NOTIFY",
+        "DASHBOARD_HOLDINGS_ANALYSIS_SIMULATE_DECISION",
         "DASHBOARD_NOTIFICATION_ENABLED",
         "DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS",
         "DASHBOARD_FEISHU_NOTIFICATION_ENABLED",
@@ -188,8 +195,13 @@ def load_dashboard_env() -> None:
         "DASHBOARD_MAX_SINGLE_POSITION_PCT",
         "DASHBOARD_MAX_TOTAL_POSITION_PCT",
         "DASHBOARD_MIN_CASH_RESERVE_PCT",
+        "DASHBOARD_INITIAL_CASH",
         "DASHBOARD_MARKET_GUIDANCE_ENABLED",
         "DASHBOARD_MORNING_MAX_OPEN_POSITIONS",
+        'DASHBOARD_T_ASSISTANT_MODEL_ENABLED',
+        'DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS',
+        'DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS',
+        'DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE',
         STOCK_UNIVERSE_ENV,
         STRATEGY_SOURCE_ENV,
         PERSONA_STRATEGY_ENV,
@@ -219,7 +231,7 @@ CONFIG_PATH = Path(os.environ.get("DASHBOARD_CONFIG", DASHBOARD_HOME / "config.y
 STOCK_TOOLS_SCRIPT = Path(
     os.environ.get("DASHBOARD_CN_STOCK_TOOLS", SCRIPT_DIR / "entrypoints" / "cn_stock_tools.py")
 ).expanduser()
-INITIAL_CASH = 1_000_000.0
+INITIAL_CASH = env_float("DASHBOARD_INITIAL_CASH", 1_000_000.0)
 # 交易费率：万一免五 = 佣金 0.01%，免 5 元最低佣金。
 # A股另计：印花税仅卖出 0.05%，过户费双向 0.001%。
 COMMISSION_RATE = 0.0001
@@ -383,6 +395,68 @@ def _notify_trade_executions_safely(executed: list[dict[str, Any]]) -> None:
             print(f"[WARN] 交易通知发送失败: {type(exc).__name__}", file=sys.stderr, flush=True)
         except Exception:
             pass
+
+
+def _dispatch_notification_safely(event_type: str, title: str, text: str, metadata: dict[str, Any] | None = None) -> list[Any]:
+    """Send a generic notification without letting push failures affect trading code."""
+    try:
+        from notifications import Notification, dispatch
+
+        return dispatch(Notification(event_type, title, text, metadata or {})) or []
+    except Exception as exc:
+        try:
+            print(f"[WARN] 通知发送失败: {type(exc).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    return []
+
+
+def notify_manual_practice_cycle_result_safely(result: dict[str, Any] | None) -> list[Any]:
+    """Push a manual-cycle receipt when no trade execution notification is produced."""
+    result = result if isinstance(result, dict) else {}
+    executed = [item for item in (result.get("executed") or []) if isinstance(item, dict)]
+    # Actual fills already emit a dedicated, more detailed trade notification.
+    if executed:
+        return []
+
+    decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+    portfolio = result.get("portfolio") if isinstance(result.get("portfolio"), dict) else {}
+    t_assistant = result.get("t_assistant") if isinstance(result.get("t_assistant"), dict) else {}
+    summary = str(decision.get("summary") or "").strip()
+    if not summary:
+        if result.get("reason") == "no_candidates":
+            summary = "本轮选股没有候选股，未产生试仓成交。"
+        elif result.get("skipped"):
+            summary = f"本轮已跳过：{result.get('reason') or '未产生试仓成交'}"
+        else:
+            summary = "本轮手动试仓未产生模拟成交。"
+
+    trade_reason = str(result.get("trade_reason") or decision.get("trade_reason") or "").strip()
+    if not trade_reason and "非A股可成交时段" in summary:
+        trade_reason = "当前不在A股可成交时段"
+    action_count = len([a for a in (decision.get("actions") or []) if isinstance(a, dict)])
+    lines = [
+        "手动触发选股及买卖策略已完成。",
+        summary,
+        "结果：未产生 BUY/SELL 模拟成交，因此没有成交通知。",
+    ]
+    if trade_reason:
+        lines.append(f"原因：{trade_reason}")
+    if action_count:
+        lines.append(f"模型动作数：{action_count}条，但均未落成模拟成交。")
+    if t_assistant.get("summary"):
+        lines.append(f"T助手：{t_assistant.get('summary')}")
+    if portfolio:
+        cash = portfolio.get("cash")
+        equity = portfolio.get("total_equity")
+        positions = portfolio.get("positions") or []
+        lines.append(f"账户：权益{_price_text(equity)}，现金{_price_text(cash)}，持仓{len(positions)}只。")
+    return _dispatch_notification_safely(
+        "practice.manual_cycle.no_fill",
+        "Jeff小助理手动试仓结果（未成交）",
+        "\n".join(lines),
+        {"manual_cycle": True, "executed_count": 0, "reason": result.get("reason") or ""},
+    )
 
 
 def today_key() -> str:
@@ -664,6 +738,8 @@ def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
                 ledger_qty -= shares
         ledger_qty = max(0, ledger_qty)
         position = positions.get(code) or {}
+        if position.get("import_source") == "manual_holding_import":
+            continue
         current_qty = position_qty(position)
         if ledger_qty >= current_qty:
             continue
@@ -764,6 +840,291 @@ def save_state(state: dict[str, Any]) -> None:
 def normalize_code(code: str) -> str:
     code = re.sub(r"\D", "", str(code or ""))[-6:]
     return code
+
+
+HOLDING_IMPORT_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "code": ("code", "symbol", "证券代码", "股票代码", "代码"),
+    "name": ("name", "证券名称", "股票名称", "名称"),
+    "qty": ("qty", "shares", "持仓", "持仓数量", "数量", "股份余额", "可用余额"),
+    "avg_cost": ("avg_cost", "cost", "成本价", "持仓成本", "成本", "成本价格"),
+    "last_price": ("last_price", "price", "现价", "最新价", "市价", "当前价"),
+    "buy_strategy": ("buy_strategy", "strategy", "策略", "买入策略"),
+    "entry_reason": ("entry_reason", "reason", "备注", "入场理由", "持仓备注"),
+    "buy_date": ("buy_date", "date", "买入日期", "建仓日期"),
+    "management_mode": ("management_mode", "position_management_mode", "管理模式", "持仓管理", "策略管理"),
+}
+
+
+def _normalize_import_field_name(value: Any) -> str:
+    return re.sub(r"[\s_\-（）()：:]+", "", str(value or "").strip().lower())
+
+
+HOLDING_IMPORT_ALIAS_LOOKUP = {
+    _normalize_import_field_name(alias): canonical
+    for canonical, aliases in HOLDING_IMPORT_FIELD_ALIASES.items()
+    for alias in aliases
+}
+
+
+def _import_row_value(row: dict[str, Any], field: str) -> Any:
+    for key, value in row.items():
+        normalized = _normalize_import_field_name(key)
+        if HOLDING_IMPORT_ALIAS_LOOKUP.get(normalized) == field:
+            return value
+    return ""
+
+
+def _parse_import_float(value: Any, field_label: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_label}不能为空")
+    text = text.replace(",", "").replace("，", "")
+    text = re.sub(r"[元股\s]", "", text)
+    try:
+        result = float(text)
+    except ValueError as exc:
+        raise ValueError(f"{field_label}不是有效数字：{value}") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{field_label}不是有效数字：{value}")
+    return result
+
+
+def _parse_import_qty(value: Any) -> int:
+    qty_float = _parse_import_float(value, "持仓数量")
+    qty = int(qty_float)
+    if abs(qty_float - qty) > 1e-6:
+        raise ValueError(f"持仓数量必须是整数：{value}")
+    if qty <= 0:
+        raise ValueError("持仓数量必须大于0")
+    return qty
+
+
+def _rows_from_import_json(raw_text: str) -> list[dict[str, Any]] | None:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict):
+        positions = payload.get("positions")
+        if isinstance(positions, dict):
+            rows = []
+            for code, pos in positions.items():
+                if isinstance(pos, dict):
+                    rows.append({"code": code, **pos})
+            return rows
+        if isinstance(positions, list):
+            return [item for item in positions if isinstance(item, dict)]
+        if any(_import_row_value(payload, field) for field in ("code", "qty", "avg_cost")):
+            return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    raise ValueError("JSON格式需为持仓数组、单条持仓对象，或包含 positions 的对象")
+
+
+def _csv_delimiter_for_import(sample: str) -> str:
+    if "\t" in sample:
+        return "\t"
+    try:
+        return csv.Sniffer().sniff(sample[:2048], delimiters=",\t;|").delimiter
+    except csv.Error:
+        return ","
+
+
+def _rows_from_import_table(raw_text: str) -> list[dict[str, Any]]:
+    normalized_text = raw_text.replace("\ufeff", "").replace("，", ",")
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    delimiter = _csv_delimiter_for_import("\n".join(lines[:5]))
+    first_values = next(csv.reader([lines[0]], delimiter=delimiter), [])
+    has_header = any(_normalize_import_field_name(value) in HOLDING_IMPORT_ALIAS_LOOKUP for value in first_values)
+    if has_header:
+        reader = csv.DictReader(io.StringIO("\n".join(lines)), delimiter=delimiter)
+        return [dict(row) for row in reader if row and any(str(v or "").strip() for v in row.values())]
+    fallback_fields = [
+        "code", "name", "qty", "avg_cost", "last_price", "buy_strategy", "entry_reason", "management_mode",
+    ]
+    rows: list[dict[str, Any]] = []
+    for values in csv.reader(lines, delimiter=delimiter):
+        if not any(str(value or "").strip() for value in values):
+            continue
+        rows.append({field: values[idx] if idx < len(values) else "" for idx, field in enumerate(fallback_fields)})
+    return rows
+
+
+def parse_imported_holdings(raw_text: str) -> list[dict[str, Any]]:
+    """Parse manually supplied current holdings without creating trade fills."""
+    text = str(raw_text or "").strip()
+    if not text:
+        raise ValueError("请粘贴当前持仓数据")
+    raw_rows = _rows_from_import_json(text)
+    if raw_rows is None:
+        raw_rows = _rows_from_import_table(text)
+    if not raw_rows:
+        raise ValueError("未识别到可导入的持仓行")
+
+    normalized_rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(raw_rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        code = normalize_code(_import_row_value(row, "code"))
+        if not code or not re.fullmatch(r"\d{6}", code):
+            raise ValueError(f"第{idx}行股票代码无效")
+        qty = _parse_import_qty(_import_row_value(row, "qty"))
+        avg_cost = _parse_import_float(_import_row_value(row, "avg_cost"), "成本价")
+        if avg_cost <= 0:
+            raise ValueError(f"第{idx}行成本价必须大于0")
+        last_price_raw = _import_row_value(row, "last_price")
+        last_price = _parse_import_float(last_price_raw, "现价") if str(last_price_raw or "").strip() else avg_cost
+        if last_price <= 0:
+            last_price = avg_cost
+        normalized_rows.append({
+            "code": code,
+            "name": str(_import_row_value(row, "name") or "").strip(),
+            "qty": qty,
+            "avg_cost": round(avg_cost, 4),
+            "last_price": round(last_price, 4),
+            "buy_strategy": str(_import_row_value(row, "buy_strategy") or "").strip(),
+            "entry_reason": str(_import_row_value(row, "entry_reason") or "").strip(),
+            "buy_date": str(_import_row_value(row, "buy_date") or "").strip(),
+            "management_mode": str(_import_row_value(row, "management_mode") or "").strip(),
+        })
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in normalized_rows:
+        prev = merged.get(row["code"])
+        if not prev:
+            merged[row["code"]] = dict(row)
+            continue
+        total_qty = int(prev["qty"]) + int(row["qty"])
+        if total_qty <= 0:
+            continue
+        prev["avg_cost"] = round(
+            (float(prev["avg_cost"]) * int(prev["qty"]) + float(row["avg_cost"]) * int(row["qty"])) / total_qty,
+            4,
+        )
+        prev["qty"] = total_qty
+        prev["last_price"] = row["last_price"] or prev["last_price"]
+        prev["name"] = row["name"] or prev.get("name", "")
+        prev["buy_strategy"] = row["buy_strategy"] or prev.get("buy_strategy", "")
+        prev["entry_reason"] = row["entry_reason"] or prev.get("entry_reason", "")
+        prev["buy_date"] = row["buy_date"] or prev.get("buy_date", "")
+        prev["management_mode"] = row["management_mode"] or prev.get("management_mode", "")
+    return list(merged.values())
+
+
+def import_current_holdings(
+    raw_text: str,
+    *,
+    mode: str = "merge",
+    cash: Any = "",
+    initial_cash: Any = "",
+    source_note: str = "",
+    management_mode: str = "t_assistant",
+) -> dict[str, Any]:
+    mode_value = str(mode or "merge").strip().lower()
+    if mode_value not in {"merge", "replace"}:
+        raise ValueError("导入模式只能是 merge 或 replace")
+    import_management_mode = normalize_position_management_mode(management_mode, default=POSITION_MANAGEMENT_T_ASSISTANT)
+    if mode_value == "replace" and not str(raw_text or "").strip():
+        rows: list[dict[str, Any]] = []
+    else:
+        rows = parse_imported_holdings(raw_text)
+
+    state = load_state()
+    if mode_value == "replace":
+        state["positions"] = {}
+    positions = state.setdefault("positions", {})
+    imported_at = now_ts()
+    imported_codes: list[str] = []
+    imported_management_modes: dict[str, str] = {}
+    for row in rows:
+        code = row["code"]
+        existing = positions.get(code) if isinstance(positions.get(code), dict) else {}
+        pos = dict(existing or {})
+        name = row.get("name") or pos.get("name") or ""
+        last_price = float(row.get("last_price") or row.get("avg_cost") or 0)
+        row_management_mode = normalize_position_management_mode(
+            row.get("management_mode") or import_management_mode,
+            default=import_management_mode,
+        )
+        pos.update({
+            "code": code,
+            "name": name,
+            "qty": int(row["qty"]),
+            "avg_cost": float(row["avg_cost"]),
+            "last_price": last_price,
+            "buy_date_lots": {},
+            "buy_strategy": row.get("buy_strategy") or pos.get("buy_strategy") or "manual_import",
+            "entry_reason": row.get("entry_reason") or pos.get("entry_reason") or "手动导入当前实盘持仓用于分析",
+            "import_source": "manual_holding_import",
+            "imported_at": imported_at,
+            "management_mode": row_management_mode,
+        })
+        if row.get("buy_date"):
+            pos["buy_date"] = row["buy_date"]
+        pos["highest_price"] = max(_safe_float(pos.get("highest_price")), last_price)
+        pos.pop("shares", None)
+        positions[code] = pos
+        imported_codes.append(code)
+        imported_management_modes[code] = row_management_mode
+
+    cash_text = str(cash or "").strip()
+    if cash_text:
+        cash_value = _parse_import_float(cash_text, "现金")
+        if cash_value < 0:
+            raise ValueError("现金不能为负")
+        state["cash"] = round(cash_value, 2)
+    initial_cash_text = str(initial_cash or "").strip()
+    if initial_cash_text:
+        initial_cash_value = _parse_import_float(initial_cash_text, "初始资金")
+        if initial_cash_value <= 0:
+            raise ValueError("初始资金必须大于0")
+        state["initial_cash"] = round(initial_cash_value, 2)
+
+    quote_meta: dict[str, Any] = {}
+    try:
+        quote_meta = refresh_realtime_prices(state)
+    except Exception as exc:
+        quote_meta = {"enabled": True, "error": f"{type(exc).__name__}: {exc}", "quote_time": now_ts()}
+        state["last_quote_refresh"] = quote_meta
+
+    log_entry = {
+        "time": imported_at,
+        "b1_generated_at": "",
+        "trade_allowed": False,
+        "trade_reason": "手动导入当前持仓用于分析",
+        "decision": {
+            "summary": f"导入当前持仓：{len(imported_codes)}只（{mode_value}）",
+            "actions": [],
+            "model": "MANUAL_HOLDING_IMPORT",
+            "provider": "dashboard",
+            "imported_codes": imported_codes,
+            "management_modes": imported_management_modes,
+            "source_note": str(source_note or "").strip(),
+        },
+        "executed": [],
+    }
+    state.setdefault("decision_log", []).append(log_entry)
+    del state["decision_log"][:-50]
+    state["last_decision_at"] = imported_at
+    try:
+        record_equity(state)
+    except Exception:
+        pass
+    _sync_decision_to_db(log_entry)
+    _sync_positions_to_db(state)
+    save_state(state)
+    portfolio = enrich_portfolio(state)
+    return {
+        "ok": True,
+        "mode": mode_value,
+        "imported": len(imported_codes),
+        "codes": imported_codes,
+        "management_modes": imported_management_modes,
+        "quote_refresh": quote_meta,
+        "portfolio": portfolio,
+    }
 
 
 def quote_one(code: str) -> dict[str, Any]:
@@ -1286,6 +1647,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             "bought_today": today_buy_qty > 0,
             "buy_strategy": pos.get("buy_strategy") or "",
             "entry_reason": pos.get("entry_reason") or "",
+            "management_mode": position_management_mode(pos),
+            "management_mode_label": "仅T助手" if is_t_assistant_managed(pos) else "默认策略",
             "strategy_mark": strategy_mark,
             "strategy_mark_id": strategy_mark.get("strategy_id") or "",
             "strategy_mark_label": strategy_mark.get("label") or "",
@@ -1359,6 +1722,7 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
         "last_decision_at": state.get("last_decision_at") or "",
         "last_quote_refresh": state.get("last_quote_refresh") or {},
         "last_intraday_refresh": state.get("last_intraday_refresh") or {},
+        "last_t_assistant": state.get("last_t_assistant") or {},
         "last_error": state.get("last_error") or "",
         "market_decision_context": state.get("market_decision_context") or {},
     }
@@ -1376,6 +1740,977 @@ def available_to_sell(pos: dict[str, Any], today: str | None = None) -> int:
         if date != today:
             total += int(lot_qty or 0)
     return min(qty, total)
+
+
+def is_t_assistant_window(dt: datetime | None = None) -> tuple[bool, str]:
+    """做T助手只在连续竞价和尾盘前观察；14:50后不提示新做T。"""
+    dt = dt or datetime.now()
+    if not is_a_share_trading_day(dt):
+        return False, "非A股交易日"
+    t = dt.time()
+    if dtime(9, 30) <= t <= dtime(11, 30):
+        return True, "上午连续竞价"
+    if dtime(13, 0) <= t <= dtime(14, 50):
+        return True, "下午连续竞价"
+    if dtime(14, 50) < t <= dtime(15, 0):
+        return False, "14:50后不建议新做T，只处理既有计划和风险"
+    if dtime(9, 15) <= t < dtime(9, 30):
+        return False, "集合竞价/静默期只观察，不做T判断"
+    if dtime(11, 30) < t < dtime(13, 0):
+        return False, "午间休市，等待下午连续竞价"
+    return False, "非A股连续竞价时段"
+
+
+def _pct(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return (numerator / denominator - 1.0) * 100.0
+
+
+def _round_lot(value: int | float) -> int:
+    try:
+        return max(0, int(float(value)) // 100 * 100)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _price_text(value: Any) -> str:
+    number = _safe_float(value, 0.0)
+    return f"{number:.2f}" if number > 0 else "-"
+
+
+def _t_assistant_position_item(pos: dict[str, Any], code: str, *, cash: float, total_equity: float, now: datetime) -> dict[str, Any]:
+    qty = position_qty(pos)
+    available = available_to_sell(pos, now.strftime("%Y-%m-%d"))
+    price = _safe_float(pos.get("last_price") or pos.get("price") or pos.get("avg_cost"), 0.0)
+    avg_cost = _safe_float(pos.get("avg_cost"), 0.0)
+    prev_close = _safe_float(pos.get("prev_close"), 0.0)
+    day_high = _safe_float(pos.get("day_high") if pos.get("day_high") is not None else pos.get("high"), 0.0)
+    day_low = _safe_float(pos.get("day_low") if pos.get("day_low") is not None else pos.get("low"), 0.0)
+    change_pct = pos.get("change_pct")
+    change_pct_float = _safe_float(change_pct, 0.0) if change_pct is not None else (_pct(price, prev_close) if prev_close > 0 else None)
+    high_pct = _pct(day_high, prev_close) if day_high > 0 and prev_close > 0 else None
+    low_pct = _pct(day_low, prev_close) if day_low > 0 and prev_close > 0 else None
+    near_high_gap_pct = (day_high - price) / day_high * 100.0 if day_high > 0 and price > 0 else None
+    rebound_from_low_pct = (price / day_low - 1.0) * 100.0 if day_low > 0 and price > 0 else None
+    amplitude_pct = (day_high / day_low - 1.0) * 100.0 if day_high > 0 and day_low > 0 else None
+    pnl_pct = (price / avg_cost - 1.0) * 100.0 if price > 0 and avg_cost > 0 else None
+    cash_buyable = _round_lot(cash / price) if price > 0 else 0
+    base_t_shares = _round_lot(min(available, max(100, qty // 3))) if available >= 100 else 0
+    buy_first_shares = _round_lot(min(available, cash_buyable, max(100, qty // 3))) if available >= 100 and cash_buyable >= 100 else 0
+
+    blockers: list[str] = []
+    if qty < 100:
+        blockers.append("持仓不足100股")
+    if available < 100:
+        blockers.append("无可卖底仓，T+1锁仓或数量不足")
+    if price <= 0:
+        blockers.append("缺少有效现价")
+    if prev_close <= 0:
+        blockers.append("缺少昨收基准")
+
+    item = {
+        "code": code,
+        "name": pos.get("name") or "",
+        "management_mode": position_management_mode(pos),
+        "management_mode_label": "仅T助手" if is_t_assistant_managed(pos) else "默认策略",
+        "managed_by_t_assistant": is_t_assistant_managed(pos),
+        "qty": qty,
+        "available_qty": available,
+        "last_price": round(price, 3) if price > 0 else None,
+        'quote_time': str(pos.get('quote_time') or ''),
+        'quote_source': str(pos.get('quote_source') or ''),
+        "avg_cost": round(avg_cost, 3) if avg_cost > 0 else None,
+        "prev_close": round(prev_close, 3) if prev_close > 0 else None,
+        "change_pct": round(change_pct_float, 2) if change_pct_float is not None else None,
+        "day_high": round(day_high, 3) if day_high > 0 else None,
+        "day_low": round(day_low, 3) if day_low > 0 else None,
+        "day_high_pct": round(high_pct, 2) if high_pct is not None else None,
+        "day_low_pct": round(low_pct, 2) if low_pct is not None else None,
+        "amplitude_pct": round(amplitude_pct, 2) if amplitude_pct is not None else None,
+        "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+        "suggested_shares": 0,
+        "can_t": False,
+        "mode": "avoid",
+        "mode_label": "暂不做T",
+        "priority": 0,
+        "blockers": blockers,
+        "trigger": "",
+        "plan": "不满足做T基础条件，等待更清晰的日内高低点和可卖底仓。",
+        "invalid_if": "跌破日内低点或大盘/板块继续走弱。",
+    }
+    if blockers:
+        return item
+
+    change = float(change_pct_float or 0.0)
+    near_high = near_high_gap_pct is not None and near_high_gap_pct <= 0.8
+    near_low = rebound_from_low_pct is not None and rebound_from_low_pct <= 0.8
+    enough_amplitude = amplitude_pct is None or amplitude_pct >= 1.6
+    deep_weak = change <= -3.0 and (near_low or (low_pct is not None and low_pct <= -3.5))
+
+    if deep_weak and base_t_shares >= 100:
+        sell_ref = price
+        buyback_high = sell_ref * 0.985
+        buyback_low = sell_ref * 0.965
+        item.update({
+            "can_t": True,
+            "mode": "sell_weak_watch_buyback",
+            "mode_label": "弱势倒T观察",
+            "priority": 3,
+            "suggested_shares": base_t_shares,
+            "trigger": f"弱势贴近日低且跌幅{change:+.2f}%时，可先卖{base_t_shares}股可卖底仓；只有跌到{buyback_low:.2f}-{buyback_high:.2f}或明显止跌承接后再看接回。",
+            "plan": "倒T以先降风险为主：先卖旧仓锁出现金，等1.5%-3.5%价差或分时止跌再接；没有价差就不接回。",
+            "invalid_if": "卖出后快速收回分时均线/昨收附近不追接；若继续放量下跌，接回动作取消，按原卖出风控处理。",
+        })
+    elif change >= 1.8 and near_high and enough_amplitude and base_t_shares >= 100:
+        sell_ref = price
+        buyback_high = sell_ref * 0.988
+        buyback_low = sell_ref * 0.975
+        item.update({
+            "can_t": True,
+            "mode": "sell_high_watch_buyback",
+            "mode_label": "可观察冲高先卖",
+            "priority": 4 if change >= 3.0 else 3,
+            "suggested_shares": base_t_shares,
+            "trigger": f"接近日高且涨幅{change:+.2f}%时，可考虑卖出{base_t_shares}股；回落至{buyback_low:.2f}-{buyback_high:.2f}再看接回。",
+            "plan": "先卖可卖底仓，等待1.2%-2.5%回落或分时承接再接回；不回落就不追接。",
+            "invalid_if": "放量突破后继续走强不急接回，或跌破均价线/昨收后取消接回。",
+        })
+    elif change <= -1.3 and near_low and buy_first_shares >= 100 and enough_amplitude:
+        sell_zone = price * 1.012
+        item.update({
+            "can_t": True,
+            "mode": "buy_low_watch_sellback",
+            "mode_label": "可观察低吸后卖旧仓",
+            "priority": 3,
+            "suggested_shares": buy_first_shares,
+            "trigger": f"贴近日低且跌幅{change:+.2f}%时，只在出现承接后低吸{buy_first_shares}股；反抽到{sell_zone:.2f}附近卖同等旧仓。",
+            "plan": "用现金低吸，随后卖出同等可卖旧仓完成日内T；若只买不卖会增加隔夜风险。",
+            "invalid_if": "买入后继续破日低或板块走弱，停止追加，优先保留现金。",
+        })
+    elif available >= 100:
+        watch_sell = prev_close * 1.018 if prev_close > 0 else price * 1.018
+        watch_buy = prev_close * 0.985 if prev_close > 0 else price * 0.985
+        item.update({
+            "mode": "watch",
+            "mode_label": "只观察",
+            "priority": 2 if abs(change) >= 1.0 else 1,
+            "suggested_shares": min(base_t_shares, buy_first_shares) if base_t_shares and buy_first_shares else base_t_shares,
+            "trigger": f"上冲{watch_sell:.2f}附近观察先卖；回踩{watch_buy:.2f}附近且有承接再考虑低吸。",
+            "plan": "当前位置没有明显价差，先等分时拉开1.5%以上空间；不为了做T而做T。",
+            "invalid_if": "振幅不足、量能萎缩或跌破日低。",
+        })
+    return item
+
+
+def evaluate_t_opportunities(state: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now()
+    enabled = bool(T_ASSISTANT_ENABLED)
+    in_window, window_reason = is_t_assistant_window(now)
+    positions = state.get("positions") if isinstance(state.get("positions"), dict) else {}
+    cash = _safe_float(state.get("cash"), 0.0)
+    total_equity = portfolio_total_equity_for_limits(cash, positions or {})
+    items = [
+        _t_assistant_position_item(pos, normalize_code(code), cash=cash, total_equity=total_equity, now=now)
+        for code, pos in (positions or {}).items()
+        if isinstance(pos, dict) and position_qty(pos) > 0
+    ]
+    items.sort(
+        key=lambda row: (
+            bool(row.get("managed_by_t_assistant")),
+            int(row.get("priority") or 0),
+            bool(row.get("can_t")),
+        ),
+        reverse=True,
+    )
+    actionable = [item for item in items if item.get("can_t")]
+    t_managed_count = sum(1 for item in items if item.get("managed_by_t_assistant"))
+    summary = "暂无持仓" if not items else (
+        f"{len(actionable)}只可做T观察，{len(items) - len(actionable)}只继续等待"
+        if actionable else "当前没有明确做T窗口，继续观察持仓分时"
+    )
+    if not enabled:
+        summary = "持仓T助手已关闭"
+    elif not in_window:
+        summary = f"{window_reason}；{summary}"
+    return {
+        "enabled": enabled,
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "in_window": in_window,
+        "window_reason": window_reason,
+        "summary": summary,
+        "cash": round(cash, 2),
+        "total_equity": round(total_equity, 2),
+        "items": items,
+        "actionable_count": len(actionable),
+        "t_managed_count": t_managed_count,
+        "note": "仅辅助判断，非自动成交；A股做T必须依赖已有可卖底仓，买回的新股当日不可再卖。",
+    }
+
+
+def _t_model_text(value: Any, limit: int = 360) -> str:
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    return text[:limit]
+
+
+def normalize_t_model_analysis(raw: dict[str, Any], assessment: dict[str, Any]) -> dict[str, Any]:
+    local_items = {
+        normalize_code(item.get('code') or ''): item
+        for item in (assessment.get('items') or [])
+        if isinstance(item, dict) and normalize_code(item.get('code') or '')
+    }
+    normalized_items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in (raw.get('items') or []):
+        if not isinstance(row, dict):
+            continue
+        code = normalize_code(row.get('code') or '')
+        local = local_items.get(code)
+        if not local or code in seen:
+            continue
+        seen.add(code)
+        verdict = str(row.get('verdict') or 'watch').strip().lower()
+        if verdict not in {'act', 'watch', 'avoid'}:
+            verdict = 'watch'
+        action = str(row.get('action') or 'wait').strip().lower()
+        if action not in {'sell_first', 'buy_first', 'wait'}:
+            action = 'wait'
+        try:
+            confidence = max(0.0, min(1.0, float(row.get('confidence') or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        available = _round_lot(local.get('available_qty') or 0)
+        local_cap = _round_lot(local.get('suggested_shares') or 0)
+        requested = _round_lot(row.get('suggested_shares') or 0)
+        cap = min(available, local_cap or available)
+        if action == 'buy_first':
+            price = _safe_float(local.get('last_price'), 0.0)
+            cash = _safe_float(assessment.get('cash'), 0.0)
+            affordable = _round_lot(cash / price) if price > 0 else 0
+            cap = min(cap, affordable)
+        suggested = min(requested or cap, cap)
+        blockers = [str(value) for value in (local.get('blockers') or []) if str(value).strip()]
+        rejected_reason = ''
+        if verdict == 'act' and confidence < T_ASSISTANT_MODEL_MIN_CONFIDENCE:
+            rejected_reason = f'模型置信度{confidence:.2f}低于阈值{T_ASSISTANT_MODEL_MIN_CONFIDENCE:.2f}'
+        elif verdict == 'act' and blockers:
+            rejected_reason = '；'.join(blockers)
+        elif verdict == 'act' and (available < 100 or suggested < 100):
+            rejected_reason = '可卖底仓或建议数量不足100股'
+        elif verdict == 'act' and action == 'wait':
+            rejected_reason = '模型没有给出可执行的做T方向'
+        if rejected_reason:
+            verdict = 'avoid' if blockers else 'watch'
+            action = 'wait'
+            suggested = 0
+
+        normalized_items.append({
+            'code': code,
+            'verdict': verdict,
+            'action': action,
+            'confidence': round(confidence, 2),
+            'suggested_shares': suggested if verdict == 'act' else 0,
+            'analysis': _t_model_text(row.get('analysis') or row.get('reason')),
+            'trigger': _t_model_text(row.get('trigger')),
+            'plan': _t_model_text(row.get('plan')),
+            'invalid_if': _t_model_text(row.get('invalid_if')),
+            'rejected_reason': rejected_reason,
+        })
+
+    actionable = [row for row in normalized_items if row.get('verdict') == 'act']
+    urgency = str(raw.get('urgency') or 'normal').strip().lower()
+    if urgency not in {'normal', 'high'}:
+        urgency = 'normal'
+    return {
+        'enabled': True,
+        'status': 'ok',
+        'model': MODEL,
+        'provider': PROVIDER_DISPLAY_NAME,
+        'checked_at': assessment.get('generated_at') or now_ts(),
+        'should_notify': raw.get('should_notify') is True and bool(actionable),
+        'urgency': urgency if actionable else 'normal',
+        'summary': _t_model_text(raw.get('summary'), 500),
+        'market_view': _t_model_text(raw.get('market_view'), 500),
+        'items': normalized_items,
+        'actionable_count': len(actionable),
+    }
+
+
+def apply_t_model_analysis(assessment: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+    assessment['rule_summary'] = assessment.get('summary') or ''
+    assessment['model_analysis'] = analysis
+    model_by_code = {
+        normalize_code(row.get('code') or ''): row
+        for row in (analysis.get('items') or [])
+        if isinstance(row, dict)
+    }
+    actionable_count = 0
+    for item in (assessment.get('items') or []):
+        if not isinstance(item, dict):
+            continue
+        item['rule_can_t'] = bool(item.get('can_t'))
+        model_row = model_by_code.get(normalize_code(item.get('code') or '')) or {}
+        item['model_verdict'] = model_row.get('verdict') or 'watch'
+        item['model_action'] = model_row.get('action') or 'wait'
+        item['model_confidence'] = model_row.get('confidence') or 0.0
+        item['model_analysis'] = model_row.get('analysis') or ''
+        item['model_trigger'] = model_row.get('trigger') or ''
+        item['model_plan'] = model_row.get('plan') or ''
+        item['model_invalid_if'] = model_row.get('invalid_if') or ''
+        item['model_rejected_reason'] = model_row.get('rejected_reason') or ''
+        item['can_t'] = (
+            analysis.get('status') == 'ok'
+            and bool(analysis.get('should_notify'))
+            and item['model_verdict'] == 'act'
+        )
+        if item['can_t']:
+            actionable_count += 1
+            item['suggested_shares'] = int(model_row.get('suggested_shares') or item.get('suggested_shares') or 0)
+            if item['model_action'] == 'sell_first':
+                item['mode_label'] = '模型确认：先卖后接'
+            elif item['model_action'] == 'buy_first':
+                item['mode_label'] = '模型确认：先买后卖旧仓'
+    assessment['actionable_count'] = actionable_count
+    if analysis.get('status') == 'ok':
+        assessment['summary'] = analysis.get('summary') or (
+            f'模型确认{actionable_count}只已到做T观察时机'
+            if actionable_count else '模型复核完成，当前没有需要操作的做T时机'
+        )
+    elif analysis.get('status') == 'error':
+        assessment['summary'] = 'T助手模型复核失败，本轮保持静默，不使用规则模板代替模型判断'
+    return assessment
+
+
+def _t_assistant_signature(assessment: dict[str, Any]) -> str:
+    model_analysis = assessment.get('model_analysis') if isinstance(assessment.get('model_analysis'), dict) else {}
+    if model_analysis.get('status') == 'ok':
+        signals = sorted(
+            (
+                str(row.get('code') or ''),
+                str(row.get('action') or ''),
+                str(row.get('verdict') or ''),
+            )
+            for row in (model_analysis.get('items') or [])
+            if isinstance(row, dict) and row.get('verdict') == 'act'
+        )
+        return json.dumps({'model_signals': signals}, ensure_ascii=False, sort_keys=True)
+    buckets = []
+    bucket_size = T_ASSISTANT_MIN_CHANGE_BUCKET_PCT
+    for item in (assessment.get("items") or [])[:6]:
+        change = item.get("change_pct")
+        try:
+            change_bucket = round(float(change or 0.0) / bucket_size) * bucket_size
+        except Exception:
+            change_bucket = 0.0
+        buckets.append({
+            "code": item.get("code"),
+            "mode": item.get("mode"),
+            "shares": item.get("suggested_shares"),
+            "change_bucket": round(change_bucket, 2),
+            "can_t": bool(item.get("can_t")),
+        })
+    return json.dumps(
+        {
+            "in_window": bool(assessment.get("in_window")),
+            "summary": assessment.get("summary"),
+            "items": buckets,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def format_t_assistant_notification(assessment: dict[str, Any]) -> str:
+    model_analysis = assessment.get('model_analysis') if isinstance(assessment.get('model_analysis'), dict) else {}
+    if model_analysis.get('status') == 'ok':
+        lines = [
+            '大模型复核：' + str(model_analysis.get('summary') or assessment.get('summary') or '做T时机已确认'),
+            '模型：' + str(model_analysis.get('model') or MODEL) + '（' + str(model_analysis.get('provider') or PROVIDER_DISPLAY_NAME) + '）',
+        ]
+        if model_analysis.get('market_view'):
+            lines.append('最新盘面：' + str(model_analysis.get('market_view')))
+        actionable_codes = {
+            str(row.get('code') or '')
+            for row in (model_analysis.get('items') or [])
+            if isinstance(row, dict) and row.get('verdict') == 'act'
+        }
+        selected = [
+            item for item in (assessment.get('items') or [])
+            if isinstance(item, dict) and str(item.get('code') or '') in actionable_codes
+        ]
+        for item in selected[:5]:
+            name = str(item.get('name') or '').strip() or '持仓'
+            code = str(item.get('code') or '-')
+            change = item.get('change_pct')
+            change_text = f'{float(change):+.2f}%' if isinstance(change, (int, float)) else '-'
+            model_confidence_value = float(item.get('model_confidence') or 0)
+            lines.append(
+                name + '(' + code + ')：' + str(item.get('mode_label') or '模型确认机会') + '，'
+                + '现价' + _price_text(item.get('last_price')) + '，今日' + change_text + '，'
+                + '建议' + str(int(item.get('suggested_shares') or 0)) + '股，'
+                + '置信度' + f'{model_confidence_value:.0%}'
+            )
+            if item.get('model_analysis'):
+                lines.append('  判断：' + str(item.get('model_analysis')))
+            if item.get('model_trigger'):
+                lines.append('  时机：' + str(item.get('model_trigger')))
+            if item.get('model_plan'):
+                lines.append('  计划：' + str(item.get('model_plan')))
+            if item.get('model_invalid_if'):
+                lines.append('  失效：' + str(item.get('model_invalid_if')))
+        lines.append('仅为模型辅助判断，不自动成交；请结合盘口确认。')
+        return '\n'.join(lines)
+    lines = [
+        str(assessment.get("summary") or "持仓T助手"),
+        str(assessment.get("note") or "仅辅助判断，非自动成交。"),
+    ]
+    for item in (assessment.get("items") or [])[:5]:
+        name = str(item.get("name") or "").strip() or "持仓"
+        code = str(item.get("code") or "-")
+        change = item.get("change_pct")
+        change_text = f"{float(change):+.2f}%" if isinstance(change, (int, float)) else "-"
+        line = (
+            f"{name}({code})：{item.get('mode_label') or '-'}，"
+            f"现价{_price_text(item.get('last_price'))}，今日{change_text}，"
+            f"可卖{int(item.get('available_qty') or 0)}股"
+        )
+        if int(item.get("suggested_shares") or 0) > 0:
+            line += f"，建议观察{int(item.get('suggested_shares') or 0)}股"
+        lines.append(line)
+        trigger = str(item.get("trigger") or "").strip()
+        plan = str(item.get("plan") or "").strip()
+        invalid_if = str(item.get("invalid_if") or "").strip()
+        if trigger:
+            lines.append(f"  触发：{trigger}")
+        if plan:
+            lines.append(f"  计划：{plan}")
+        if invalid_if:
+            lines.append(f"  失效：{invalid_if}")
+    return "\n".join(lines)
+
+
+def notify_t_assistant_if_needed(
+    state: dict[str, Any],
+    assessment: dict[str, Any],
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    model_analysis = assessment.get('model_analysis') if isinstance(assessment.get('model_analysis'), dict) else {}
+    if T_ASSISTANT_MODEL_ENABLED and not force:
+        if model_analysis.get('status') != 'ok':
+            return {'notified': False, 'reason': 'model_unavailable'}
+        if not model_analysis.get('should_notify'):
+            return {'notified': False, 'reason': 'model_no_action'}
+    if not assessment.get("enabled") or not assessment.get("items"):
+        return {"notified": False, "reason": "disabled_or_empty"}
+    if not assessment.get("in_window") and not force:
+        return {"notified": False, "reason": "outside_t_window"}
+    signature = _t_assistant_signature(assessment)
+    last = state.get("t_assistant_notify") if isinstance(state.get("t_assistant_notify"), dict) else {}
+    last_dt = parse_ts(str(last.get("last_at") or ""))
+    now_dt = parse_ts(str(assessment.get("generated_at") or "")) or datetime.now()
+    elapsed = (now_dt - last_dt).total_seconds() if last_dt else None
+    signature_changed = signature != str(last.get("signature") or "")
+    cooldown_elapsed = elapsed is None or elapsed >= T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS
+    urgency = str(model_analysis.get('urgency') or 'normal')
+    if not force and not signature_changed:
+        return {'notified': False, 'reason': 'duplicate_signal', 'elapsed_seconds': elapsed}
+    if not force and not cooldown_elapsed and urgency != 'high':
+        return {'notified': False, 'reason': 'cooldown', 'elapsed_seconds': elapsed}
+    if not force and not signature_changed and not cooldown_elapsed:
+        return {"notified": False, "reason": "cooldown", "elapsed_seconds": elapsed}
+    if not force and signature_changed and elapsed is not None and elapsed < 60:
+        return {"notified": False, "reason": "changed_too_soon", "elapsed_seconds": elapsed}
+
+    text = format_t_assistant_notification(assessment)
+    results = _dispatch_notification_safely(
+        "practice.t_assistant",
+        "Jeff小助理持仓T助手",
+        text,
+        {"actionable_count": assessment.get("actionable_count"), "generated_at": assessment.get("generated_at")},
+    )
+    failed_count = sum(1 for result in results if not bool(getattr(result, "ok", False)))
+    state["t_assistant_notify"] = {
+        "last_at": assessment.get("generated_at") or now_ts(),
+        "signature": signature,
+        "failed_count": failed_count,
+        "delivered_count": sum(1 for result in results if bool(getattr(result, "ok", False))),
+    }
+    return {"notified": True, "failed_count": failed_count, "results": results}
+
+
+def run_t_assistant_once(
+    dt: datetime | None = None,
+    *,
+    notify: bool = True,
+    force_notify: bool = False,
+) -> dict[str, Any]:
+    """Refresh holdings and push advisory做T guidance. It never executes trades."""
+    dt = dt or datetime.now()
+    state = load_state()
+    should_refresh = bool(T_ASSISTANT_ENABLED) and (force_notify or is_t_assistant_window(dt)[0])
+    if should_refresh:
+        try:
+            refresh_realtime_prices(state)
+            refresh_position_intraday(state)
+        except Exception as exc:
+            state["last_t_assistant_error"] = f"{type(exc).__name__}: {exc}"
+    assessment = evaluate_t_opportunities(state, dt)
+    if T_ASSISTANT_MODEL_ENABLED:
+        if assessment.get('enabled') and assessment.get('in_window') and assessment.get('items'):
+            try:
+                raw_model_analysis = call_model_t_assistant_analysis(
+                    assessment,
+                    state,
+                    state.get('last_t_assistant') if isinstance(state.get('last_t_assistant'), dict) else {},
+                )
+                model_analysis = normalize_t_model_analysis(raw_model_analysis, assessment)
+            except Exception as exc:
+                model_analysis = {
+                    'enabled': True,
+                    'status': 'error',
+                    'model': MODEL,
+                    'provider': PROVIDER_DISPLAY_NAME,
+                    'checked_at': assessment.get('generated_at') or now_ts(),
+                    'should_notify': False,
+                    'items': [],
+                    'error': f'{type(exc).__name__}: {exc}',
+                }
+            apply_t_model_analysis(assessment, model_analysis)
+        else:
+            assessment['model_analysis'] = {
+                'enabled': True,
+                'status': 'skipped',
+                'model': MODEL,
+                'provider': PROVIDER_DISPLAY_NAME,
+                'checked_at': assessment.get('generated_at') or now_ts(),
+                'should_notify': False,
+                'reason': 'outside_t_window_or_empty',
+                'items': [],
+            }
+    else:
+        assessment['model_analysis'] = {
+            'enabled': False,
+            'status': 'disabled',
+            'should_notify': False,
+            'items': [],
+        }
+    notify_result = {"notified": False, "reason": "notify_disabled"}
+    if notify:
+        notify_result = notify_t_assistant_if_needed(state, assessment, force=force_notify)
+    assessment["notify"] = {
+        key: value
+        for key, value in notify_result.items()
+        if key != "results"
+    }
+    state["last_t_assistant"] = assessment
+    if notify_result.get("notified"):
+        log_entry = {
+            "time": assessment.get("generated_at") or now_ts(),
+            "b1_generated_at": "",
+            "trade_allowed": False,
+            "trade_reason": "持仓T助手仅推送辅助判断，不自动成交",
+            "decision": {
+                "summary": assessment.get("summary") or "持仓T助手",
+                "actions": [
+                    {
+                        "action": "HOLD",
+                        "code": item.get("code"),
+                        "shares": item.get("suggested_shares") or 0,
+                        'reason': item.get('model_plan') or item.get('model_analysis') or item.get('mode_label') or '',
+                    }
+                    for item in (assessment.get('items') or [])[:5]
+                    if item.get('can_t')
+                ],
+                'model': str((assessment.get('model_analysis') or {}).get('model') or MODEL),
+                'provider': str((assessment.get('model_analysis') or {}).get('provider') or PROVIDER_DISPLAY_NAME),
+                "t_assistant": assessment,
+            },
+            "executed": [],
+        }
+        state.setdefault("decision_log", []).append(log_entry)
+        del state["decision_log"][:-50]
+        _sync_decision_to_db(log_entry)
+    save_state(state)
+    return assessment
+
+
+def _holdings_action_lines(decision: dict[str, Any], limit: int = 6) -> list[str]:
+    lines: list[str] = []
+    for action in (decision.get("actions") or [])[:limit]:
+        if not isinstance(action, dict):
+            continue
+        act = str(action.get("action") or "HOLD").upper()
+        code = normalize_code(action.get("code") or "")
+        name = str(action.get("name") or "").strip()
+        shares = parse_model_action_shares(action) or 0
+        reason = str(action.get("reason") or "").strip()
+        label = f"{name}({code})" if name and code else (code or name or "持仓")
+        if act in {"BUY", "SELL"} and shares > 0:
+            prefix = f"{act} {shares}股"
+        else:
+            prefix = act
+        lines.append(f"{label}：{prefix}，{reason or '等待更清晰信号'}")
+    return lines
+
+
+def format_holdings_analysis_notification(result: dict[str, Any]) -> str:
+    decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+    portfolio = result.get("portfolio") if isinstance(result.get("portfolio"), dict) else {}
+    t_assistant = result.get("t_assistant") if isinstance(result.get("t_assistant"), dict) else {}
+    executed = [item for item in (result.get("executed") or []) if isinstance(item, dict)]
+    lines = [
+        str(decision.get("summary") or t_assistant.get("summary") or "持仓周期分析完成"),
+        f"时间：{result.get('checked_at') or now_ts()}",
+    ]
+    if result.get("trade_reason"):
+        lines.append(f"模拟决策：{result.get('trade_reason')}")
+    if portfolio:
+        positions = portfolio.get("positions") or []
+        lines.append(
+            f"账户：权益{_price_text(portfolio.get('total_equity'))}，"
+            f"现金{_price_text(portfolio.get('cash'))}，持仓{len(positions)}只。"
+        )
+    action_lines = _holdings_action_lines(decision)
+    if action_lines:
+        lines.append("决策动作：")
+        lines.extend(action_lines)
+    if executed:
+        lines.append("已模拟成交：")
+        for trade in executed[:6]:
+            lines.append(
+                f"{trade.get('action')} {trade.get('name') or trade.get('code')} "
+                f"{int(trade.get('shares') or 0)}股 @ {_price_text(trade.get('price'))}"
+            )
+    if t_assistant.get("summary"):
+        lines.append(f"T助手：{t_assistant.get('summary')}")
+    for item in (t_assistant.get("items") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"{item.get('name') or '持仓'}({item.get('code') or '-'})："
+            f"{item.get('mode_label') or '-'}，"
+            f"现价{_price_text(item.get('last_price'))}，"
+            f"可卖{int(item.get('available_qty') or 0)}股。"
+        )
+        plan = str(item.get("plan") or "").strip()
+        if plan:
+            lines.append(f"  计划：{plan}")
+    if decision.get("error"):
+        lines.append(f"模型状态：{decision.get('error')}")
+    lines.append("仅供模拟和复盘，不代表真实交易指令。")
+    return "\n".join(lines)
+
+
+def _notify_holdings_analysis_safely(result: dict[str, Any]) -> list[Any]:
+    text = format_holdings_analysis_notification(result)
+    return _dispatch_notification_safely(
+        "practice.holdings_analysis",
+        "Jeff小助理持仓周期分析",
+        text,
+        {
+            "checked_at": result.get("checked_at") or "",
+            "executed_count": len(result.get("executed") or []),
+            "simulate_decision": bool(result.get("simulate_decision")),
+        },
+    )
+
+
+def _persist_holdings_analysis_message(result: dict[str, Any], delivery_results: list[Any] | None = None) -> str:
+    try:
+        import push_history
+
+        checked_at = str(result.get("checked_at") or now_ts())
+        minute_key = checked_at[:16]
+        delivery = [
+            {
+                "channel": getattr(item, "channel", ""),
+                "ok": bool(getattr(item, "ok", False)),
+                "error": getattr(item, "error", ""),
+            }
+            for item in (delivery_results or [])
+        ]
+        message = {
+            "id": push_history.stable_id("practice_holdings_analysis", minute_key),
+            "timestamp": (parse_ts(checked_at) or datetime.now()).timestamp(),
+            "time_text": checked_at,
+            "category": "practice",
+            "source_type": "practice_holdings_analysis",
+            "source_id": "holdings_analysis",
+            "source_label": "持仓周期分析",
+            "external_id": minute_key,
+            "title": "持仓周期分析",
+            "content": format_holdings_analysis_notification(result),
+            "kind": "cron_output",
+            "delivery": delivery,
+            "metadata": {
+                "simulate_decision": bool(result.get("simulate_decision")),
+                "executed_count": len(result.get("executed") or []),
+                "trade_allowed": bool(result.get("trade_allowed")),
+            },
+        }
+        return str(push_history.upsert_many([message]))
+    except Exception as exc:
+        try:
+            print(f"[WARN] 持仓周期分析写入消息历史失败: {type(exc).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    return "0"
+
+
+def call_model_holdings_decision(
+    portfolio: dict[str, Any],
+    t_assistant: dict[str, Any],
+    trade_allowed: bool,
+    trade_reason: str,
+    market_strategy_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base_url, api_key = load_decision_model_config()
+    market_env = check_market_environment()
+    market_sent = check_market_sentiment()
+    market_strategy_ctx = market_strategy_ctx or current_market_strategy_context()
+    market_strategy_prompt = format_market_strategy_context_for_prompt(market_strategy_ctx)
+    adaptive = get_adaptive_params()
+    strategy_suite = current_strategy_suite()
+    preset_strategy_text = current_preset_strategy_text()
+    active_strategy_ids = active_strategy_ids_for_decision()
+    strategy_prompt_sections = build_strategy_prompt_sections(
+        strategy_suite,
+        preset_strategy_text,
+        active_strategy_ids,
+        b3_exit_hhmm=B3_EXIT_HHMM,
+        time_exit_hhmm=TIME_EXIT_HHMM,
+    )
+    trade_discipline_text = current_trade_discipline_text(
+        strategy_prompt_sections["position_limit_desc"],
+        adaptive,
+    )
+    decision_intelligence_ctx = safe_decision_intelligence_context(portfolio, [], market_strategy_ctx, "")
+    decision_intelligence_prompt = format_decision_intelligence_context_for_prompt(decision_intelligence_ctx)
+    compact_portfolio = compact_portfolio_for_decision(portfolio)
+    prompt = f"""你是A股模拟账户的持仓周期分析器。本轮不扫描全市场，只分析账户里已有持仓。
+目标：给出当前持仓的风险、止盈止损、减仓/清仓、继续持有和做T观察建议；这是模拟账户，不是真实下单。
+
+必须遵守：
+{trade_discipline_text}
+
+当前是否允许模拟成交：{trade_allowed}，原因：{trade_reason}
+大盘环境：{market_env.get('detail', '未知')}
+市场情绪：{market_sent.get('detail', '未知')}
+
+{market_strategy_prompt}
+
+{decision_intelligence_prompt}
+
+当前账户JSON：
+{json.dumps(compact_portfolio, ensure_ascii=False)}
+
+本地T助手观察：
+{json.dumps(t_assistant, ensure_ascii=False)}
+
+持仓周期分析要求：
+- 只允许围绕当前账户JSON里的已有持仓输出 SELL 或 HOLD。
+- 不要输出新开仓 BUY；如果你认为应加仓或低吸，只能在 HOLD 的 reason 里写“观察条件”，等待全市场选股/候选风控流程确认。
+- SELL 的 shares 必须是100股整数倍，且不能超过 available_qty。
+- 今日新买、available_qty 为0或不足100股的持仓不能卖出，只能 HOLD 并说明T+1/数量原因。
+- 每个 reason 简短说明：原入场战法/策略标记、当前盈亏、日内表现、风控位或失效条件。
+
+严格返回JSON，不要markdown，不要解释，格式：
+{{
+  "summary":"一句中文结论",
+  "actions":[
+    {{"action":"SELL|HOLD","code":"600000","name":"股票名","shares":100,"reason":"中文理由"}}
+  ]
+}}
+"""
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": DECISION_MAX_TOKENS,
+    }
+    content = request_chat_content(base_url, api_key, payload, MODEL, max_retries=2, timeout=DECISION_REQUEST_TIMEOUT)
+    result = extract_json(content)
+    if not isinstance(result, dict):
+        raise RuntimeError("model did not return object")
+    result["model"] = MODEL
+    result["provider"] = PROVIDER_DISPLAY_NAME
+    result["market_guidance"] = compact_market_strategy_context(market_strategy_ctx)
+    result["decision_intelligence"] = decision_intelligence_ctx
+    result["holdings_only"] = True
+    return result
+
+
+def fallback_holdings_decision(
+    portfolio: dict[str, Any],
+    t_assistant: dict[str, Any],
+    *,
+    error: str = "",
+) -> dict[str, Any]:
+    actions = []
+    position_by_code = {
+        normalize_code(pos.get("code") or ""): pos
+        for pos in (portfolio.get("positions") or [])
+        if isinstance(pos, dict) and normalize_code(pos.get("code") or "")
+    }
+    for item in (t_assistant.get("items") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        code = normalize_code(item.get("code") or "")
+        pos = position_by_code.get(code) or {}
+        reason = item.get("plan") or item.get("trigger") or item.get("mode_label") or "继续观察"
+        actions.append({
+            "action": "HOLD",
+            "code": code,
+            "name": item.get("name") or pos.get("name") or "",
+            "shares": 0,
+            "reason": str(reason),
+        })
+    if not actions:
+        for pos in list(position_by_code.values())[:8]:
+            actions.append({
+                "action": "HOLD",
+                "code": pos.get("code"),
+                "name": pos.get("name") or "",
+                "shares": 0,
+                "reason": "当前没有模型持仓决策，先保留持仓并等待下一次周期分析。",
+            })
+    decision = {
+        "summary": t_assistant.get("summary") or "持仓周期分析完成，当前以观察和风控复盘为主。",
+        "actions": actions,
+        "model": "SYSTEM_HOLDINGS_ANALYSIS",
+        "provider": "local_rule",
+        "holdings_only": True,
+        "t_assistant": t_assistant,
+    }
+    if error:
+        decision["error"] = error
+    return decision
+
+
+def run_holdings_analysis_once(
+    dt: datetime | None = None,
+    *,
+    notify: bool = True,
+    simulate_decision: bool = True,
+) -> dict[str, Any]:
+    """Analyze current holdings only, push the result, and optionally simulate SELL/HOLD decisions."""
+    dt = dt or datetime.now()
+    state = load_state()
+    refresh_errors: list[str] = []
+    for func in (refresh_realtime_prices, refresh_position_intraday):
+        try:
+            func(state)
+        except Exception as exc:
+            refresh_errors.append(f"{func.__name__}:{type(exc).__name__}")
+    try:
+        _refresh_position_bbi(state, dt)
+    except Exception as exc:
+        refresh_errors.append(f"_refresh_position_bbi:{type(exc).__name__}")
+
+    portfolio = enrich_portfolio(state)
+    t_assistant = evaluate_t_opportunities(state, dt)
+    market_strategy_ctx = current_market_strategy_context()
+    compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
+    trade_allowed, trade_reason = is_a_share_execution_time(dt)
+    if not simulate_decision:
+        trade_allowed = False
+        trade_reason = "持仓周期分析仅推送，不生成模拟成交"
+
+    positions = portfolio.get("positions") or []
+    executed: list[dict[str, Any]] = []
+    if not positions:
+        decision = {
+            "summary": "当前暂无持仓，本轮不扫描全市场。",
+            "actions": [],
+            "model": "SYSTEM_HOLDINGS_ANALYSIS",
+            "provider": "local_rule",
+            "holdings_only": True,
+            "t_assistant": t_assistant,
+        }
+    elif simulate_decision:
+        try:
+            decision = call_model_holdings_decision(
+                portfolio,
+                t_assistant,
+                trade_allowed,
+                trade_reason,
+                market_strategy_ctx,
+            )
+        except Exception as exc:
+            decision = fallback_holdings_decision(
+                portfolio,
+                t_assistant,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            state["last_error"] = decision["error"]
+    else:
+        decision = fallback_holdings_decision(portfolio, t_assistant)
+
+    if simulate_decision and trade_allowed and positions:
+        executed = execute_actions(
+            state,
+            decision,
+            [],
+            True,
+            f"持仓周期分析模拟决策：{trade_reason}",
+            market_strategy_ctx,
+        )
+    elif decision.get("actions"):
+        decision["execution_blocked_reason"] = trade_reason
+
+    checked_at = dt.strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = {
+        "time": now_ts(),
+        "b1_generated_at": "",
+        "trade_allowed": bool(simulate_decision and trade_allowed),
+        "trade_reason": f"持仓周期分析：{trade_reason}",
+        "decision": decision,
+        "executed": executed,
+        "market_decision_context": compact_market_ctx,
+        "holdings_only": True,
+    }
+    state["last_holdings_analysis"] = {
+        "checked_at": checked_at,
+        "summary": decision.get("summary") or "",
+        "executed_count": len(executed),
+        "refresh_errors": refresh_errors,
+    }
+    state["last_t_assistant"] = t_assistant
+    state.setdefault("decision_log", []).append(log_entry)
+    del state["decision_log"][:-50]
+    _sync_decision_to_db(log_entry)
+    if executed:
+        _sync_trades_to_db(executed)
+        _sync_positions_to_db(state)
+    record_equity(state)
+    save_state(state)
+
+    result = {
+        "ok": True,
+        "checked_at": checked_at,
+        "trade_allowed": bool(simulate_decision and trade_allowed),
+        "trade_reason": trade_reason,
+        "simulate_decision": bool(simulate_decision),
+        "decision": decision,
+        "executed": executed,
+        "executed_count": len(executed),
+        "portfolio": enrich_portfolio(state),
+        "t_assistant": t_assistant,
+        "refresh_errors": refresh_errors,
+    }
+    delivery_results: list[Any] = []
+    if notify:
+        delivery_results = _notify_holdings_analysis_safely(result)
+    result["notify"] = {
+        "enabled": bool(notify),
+        "delivered_count": sum(1 for item in delivery_results if bool(getattr(item, "ok", False))),
+        "failed_count": sum(1 for item in delivery_results if not bool(getattr(item, "ok", False))),
+    }
+    result["message_history_count"] = _persist_holdings_analysis_message(result, delivery_results)
+    if executed:
+        _notify_trade_executions_safely(executed)
+    return result
 
 
 def position_today_pnl(pos: dict[str, Any], price: float, qty: int, prev_close: float) -> tuple[float | None, float | None]:
@@ -1419,6 +2754,33 @@ def calc_trade_fees(amount: float, side: str) -> dict[str, float]:
         "total_fee": round(total_fee, 2),
     }
 
+
+POSITION_MANAGEMENT_DEFAULT = "default_strategy"
+POSITION_MANAGEMENT_T_ASSISTANT = "t_assistant"
+
+def normalize_position_management_mode(value: Any, *, default: str = POSITION_MANAGEMENT_DEFAULT) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"t", "t_assistant", "t-assistant", "t助手", "仅t助手", "only_t_assistant"}:
+        return POSITION_MANAGEMENT_T_ASSISTANT
+    if raw in {"default", "default_strategy", "default-strategy", "默认", "默认策略", "strategy"}:
+        return POSITION_MANAGEMENT_DEFAULT
+    return POSITION_MANAGEMENT_T_ASSISTANT if str(default) == POSITION_MANAGEMENT_T_ASSISTANT else POSITION_MANAGEMENT_DEFAULT
+
+def position_management_mode(pos: dict[str, Any] | None) -> str:
+    position = pos if isinstance(pos, dict) else {}
+    explicit = str(position.get("management_mode") or "").strip()
+    if explicit:
+        return normalize_position_management_mode(explicit)
+    # Legacy manually imported positions had only import_source/manual_import markers.
+    if (
+        position.get("import_source") == "manual_holding_import"
+        or str(position.get("buy_strategy") or "").strip().lower() == "manual_import"
+    ):
+        return POSITION_MANAGEMENT_T_ASSISTANT
+    return POSITION_MANAGEMENT_DEFAULT
+
+def is_t_assistant_managed(pos: dict[str, Any] | None) -> bool:
+    return position_management_mode(pos) == POSITION_MANAGEMENT_T_ASSISTANT
 
 def position_qty(pos: dict[str, Any]) -> int:
     return int(pos.get("qty") or pos.get("shares") or 0)
@@ -1841,6 +3203,20 @@ DECISION_INTELLIGENCE_ENABLED = env_bool("DASHBOARD_DECISION_INTELLIGENCE_ENABLE
 DECISION_INTELLIGENCE_TTL_SECONDS = max(15, env_int("DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS", 75))
 DECISION_INTELLIGENCE_MAX_ITEMS = max(1, min(8, env_int("DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS", 5)))
 DECISION_INTELLIGENCE_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
+T_ASSISTANT_ENABLED = env_bool("DASHBOARD_T_ASSISTANT_ENABLED", True)
+T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS = max(60, env_int("DASHBOARD_T_ASSISTANT_NOTIFY_COOLDOWN_SECONDS", 600))
+T_ASSISTANT_MIN_CHANGE_BUCKET_PCT = max(0.1, env_float("DASHBOARD_T_ASSISTANT_MIN_CHANGE_BUCKET_PCT", 0.5))
+HOLDINGS_ANALYSIS_NOTIFY = env_bool("DASHBOARD_HOLDINGS_ANALYSIS_NOTIFY", True)
+HOLDINGS_ANALYSIS_SIMULATE_DECISION = env_bool("DASHBOARD_HOLDINGS_ANALYSIS_SIMULATE_DECISION", True)
+
+
+T_ASSISTANT_MODEL_ENABLED = env_bool('DASHBOARD_T_ASSISTANT_MODEL_ENABLED', True)
+T_ASSISTANT_MODEL_MAX_TOKENS = max(600, env_int('DASHBOARD_T_ASSISTANT_MODEL_MAX_TOKENS', 1800))
+T_ASSISTANT_MODEL_TIMEOUT_SECONDS = max(10, env_int('DASHBOARD_T_ASSISTANT_MODEL_TIMEOUT_SECONDS', 90))
+T_ASSISTANT_MODEL_MIN_CONFIDENCE = max(
+    0.0,
+    min(1.0, env_float('DASHBOARD_T_ASSISTANT_MODEL_MIN_CONFIDENCE', 0.65)),
+)
 
 
 def market_session_phase(now: datetime | None = None) -> str:
@@ -3160,13 +4536,18 @@ def check_daily_loss_budget(state: dict[str, Any]) -> tuple[bool, float]:
     today = today_key()
     today_pnl = sum(t.get("pnl", 0) or 0 for t in trade_log if t.get("time","").startswith(today) and t.get("action")=="SELL")
     positions = state.get("positions") or {}
-    unrealized = sum(
-        (float(p.get("last_price") or p.get("avg_cost") or 0) - float(p.get("avg_cost") or 0))
-        * int(p.get("qty") or p.get("shares") or 0)
-        for p in positions.values()
-    )
-    total_eq = float(state.get("initial_cash") or INITIAL_CASH) + today_pnl + unrealized
-    pnl_pct = (total_eq / float(state.get("initial_cash") or INITIAL_CASH) - 1) * 100
+    unrealized_today = 0.0
+    for pos in positions.values():
+        if not isinstance(pos, dict):
+            continue
+        qty = position_qty(pos)
+        price = _safe_float(pos.get("last_price") or pos.get("avg_cost"))
+        prev_close = _safe_float(pos.get("prev_close"))
+        day_pnl, _ = position_today_pnl(pos, price, qty, prev_close)
+        if day_pnl is not None:
+            unrealized_today += day_pnl
+    initial_cash = float(state.get("initial_cash") or INITIAL_CASH)
+    pnl_pct = ((today_pnl + unrealized_today) / initial_cash) * 100 if initial_cash > 0 else 0.0
     return pnl_pct <= DAILY_LOSS_BUDGET_PCT, pnl_pct
 
 
@@ -3386,6 +4767,8 @@ def evaluate_sell_signal(
     tracking fields such as peak price and consecutive BBI-break days.
     """
     today = today or today_key()
+    if is_t_assistant_managed(pos):
+        return None
     entry_strategy = position_entry_strategy(pos)
     zettaranc_position = is_zettaranc_strategy(entry_strategy)
     realtime_price = float(pos.get("last_price") or pos.get("close") or pos.get("avg_cost") or 0)
@@ -3755,6 +5138,8 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
     
     for code in list(positions.keys()):
         pos = positions[code]
+        if is_t_assistant_managed(pos):
+            continue
         sellable = available_to_sell(pos, today)
         if sellable <= 0:
             continue
@@ -4171,6 +5556,8 @@ def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
             "pnl_pct": pos.get("pnl_pct"),
             "buy_strategy": pos.get("buy_strategy"),
             "entry_reason": pos.get("entry_reason"),
+            "management_mode": pos.get("management_mode") or position_management_mode(pos),
+            "management_mode_label": "仅T助手" if is_t_assistant_managed(pos) else "默认策略",
             "strategy_mark": pos.get("strategy_mark") or {},
             "strategy_mark_id": pos.get("strategy_mark_id") or "",
             "strategy_mark_label": pos.get("strategy_mark_label") or "",
@@ -4396,6 +5783,103 @@ def load_decision_model_config() -> tuple[str, str]:
     return base_url, api_key
 
 
+def _compact_previous_t_model_analysis(previous: dict[str, Any]) -> dict[str, Any]:
+    model_analysis = previous.get('model_analysis') if isinstance(previous.get('model_analysis'), dict) else {}
+    return {
+        'generated_at': previous.get('generated_at') or '',
+        'summary': model_analysis.get('summary') or previous.get('summary') or '',
+        'should_notify': bool(model_analysis.get('should_notify')),
+        'items': [
+            {
+                'code': row.get('code'),
+                'verdict': row.get('verdict'),
+                'action': row.get('action'),
+                'confidence': row.get('confidence'),
+                'analysis': row.get('analysis'),
+                'trigger': row.get('trigger'),
+                'invalid_if': row.get('invalid_if'),
+            }
+            for row in (model_analysis.get('items') or [])
+            if isinstance(row, dict)
+        ][:8],
+    }
+
+
+def call_model_t_assistant_analysis(
+    assessment: dict[str, Any],
+    state: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base_url, api_key = load_decision_model_config()
+    portfolio = enrich_portfolio(state)
+    compact_portfolio = compact_portfolio_for_decision(portfolio)
+    market_env = check_market_environment()
+    market_sentiment = check_market_sentiment()
+    market_strategy_ctx = current_market_strategy_context()
+    decision_intelligence = safe_decision_intelligence_context(portfolio, [], market_strategy_ctx, '')
+    rule_items = [
+        {
+            key: item.get(key)
+            for key in (
+                'code', 'name', 'qty', 'available_qty', 'last_price', 'quote_time', 'quote_source', 'avg_cost', 'prev_close',
+                'change_pct', 'day_high', 'day_low', 'day_high_pct', 'day_low_pct',
+                'amplitude_pct', 'pnl_pct', 'suggested_shares', 'can_t', 'mode',
+                'mode_label', 'blockers', 'trigger', 'plan', 'invalid_if',
+            )
+        }
+        for item in (assessment.get('items') or [])
+        if isinstance(item, dict)
+    ]
+    previous_compact = _compact_previous_t_model_analysis(previous or {})
+    prompt = f'''你是A股持仓做T时机复核模型。系统每5分钟静默检查一次，但绝不能因此定时推送。
+
+你的任务是结合最新行情、账户持仓、大盘与板块环境、本地规则候选以及上一次判断，判断此刻是否已经出现值得用户立即关注的做T时机。
+
+核心原则：
+- 只有现在已经满足操作观察条件，用户此刻需要看盘确认时，should_notify 才能为 true。
+- 仅仅接近条件、等待回落、继续观察、没有实质变化时，should_notify 必须为 false。
+- 同一机会相较上次没有动作方向变化时，不要为了更新价格而重复提醒。
+- act 表示此刻已到观察执行窗口；watch 表示尚未到；avoid 表示不应做T。
+- action 只能是 sell_first、buy_first、wait。
+- 必须遵守A股T+1、100股整数倍、available_qty、现金和交易时段约束。
+- suggested_shares 不得超过本地规则给出的建议上限与 available_qty。
+- buy_first 还必须受当前现金可买数量约束；预期价差必须足以覆盖交易成本与滑点。
+- 规则是硬风控参考，你可以否决规则候选；若本地规则仅为watch但无blockers，你可以基于综合盘面确认act。
+- 信息不充分、行情矛盾或置信度不足时宁可静默。
+- urgency 只有需要立即看盘且延迟可能明显改变时机时才用 high，否则用 normal。
+
+返回严格JSON对象，字段为：should_notify布尔值、urgency、summary、market_view、items数组。
+每个items元素必须包含：code、verdict、action、confidence（0到1）、suggested_shares、analysis、trigger、plan、invalid_if。
+不要返回Markdown，不要解释JSON之外的内容。
+
+检查时间：{assessment.get('generated_at')}
+账户：{json.dumps(compact_portfolio, ensure_ascii=False)}
+本地规则候选：{json.dumps(rule_items, ensure_ascii=False)}
+大盘环境：{json.dumps(market_env, ensure_ascii=False)}
+市场情绪：{json.dumps(market_sentiment, ensure_ascii=False)}
+盘面策略上下文：{json.dumps(compact_market_strategy_context(market_strategy_ctx), ensure_ascii=False)}
+最新综合参考：{json.dumps(decision_intelligence, ensure_ascii=False)}
+上一次模型判断：{json.dumps(previous_compact, ensure_ascii=False)}
+'''
+    payload = {
+        'model': MODEL,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'max_tokens': T_ASSISTANT_MODEL_MAX_TOKENS,
+    }
+    content = request_chat_content(
+        base_url,
+        api_key,
+        payload,
+        MODEL,
+        max_retries=2,
+        timeout=T_ASSISTANT_MODEL_TIMEOUT_SECONDS,
+    )
+    result = extract_json(content)
+    if not isinstance(result, dict):
+        raise RuntimeError('T assistant model did not return an object')
+    return result
+
+
 def call_model_decision(
     candidates: list[dict[str, Any]],
     portfolio: dict[str, Any],
@@ -4476,6 +5960,7 @@ def call_model_decision(
         held_candidate_lines.append(
             f"  {code} {c.get('name') or pos.get('name')} 当前仓位{pos.get('position_pct')}% "
             f"盈亏{pos.get('pnl_pct')}% 今日{pos.get('today_pnl_pct')}% "
+            f"管理:{pos.get('management_mode_label') or pos.get('management_mode') or '默认策略'} "
             f"候选战法:{strat_label} 评分:{c.get('best_score')}/{c.get('score_total',10)} "
             f"基准:{c.get('entry_threshold','-')} 距BBI:{c.get('distance_pct')}% "
             f"风险:{','.join(c.get('risk_flags',[]) or ['无'])}"
@@ -4490,7 +5975,8 @@ def call_model_decision(
     )
     decision_intelligence_prompt = format_decision_intelligence_context_for_prompt(decision_intelligence_ctx)
     trade_discipline_text = current_trade_discipline_text(position_limit_desc, adaptive)
-    prompt = f"""你是A股模拟账户交易决策器。账户初始资金100万，只做A股模拟交易，不是真实下单。
+    initial_cash_label = f"{float(portfolio.get('initial_cash') or INITIAL_CASH):.2f}元"
+    prompt = f"""你是A股模拟账户交易决策器。账户初始资金{initial_cash_label}，只做A股模拟交易，不是真实下单。
 必须遵守：
 {trade_discipline_text}
 
@@ -4501,6 +5987,8 @@ def call_model_decision(
 {active_strategy_section}
 
 隔离要求：本轮新开仓只能依据上述当前策略及其候选；不得引用、混合或补充其他未启用策略。已有持仓继续按各自 strategy_mark 执行原策略退出纪律。
+
+持仓管理权：标记为“仅T助手”的持仓是历史手动导入底仓，默认策略不得对其 BUY 或 SELL，也不得止损、止盈、清仓或摊低成本；只允许持仓T助手给出日内做T观察建议。对这类持仓必须输出 HOLD。
 
 ⚠️ 有风险标记的候选股，请结合其近期消息面（利空/减持/监管）综合判断，不要只看技术面。
 
@@ -4773,6 +6261,10 @@ def execute_actions(
         act = str(action.get("action") or "HOLD").upper()
         code = normalize_code(action.get("code") or "")
         if not code or act == "HOLD":
+            continue
+        protected_pos = positions.get(code)
+        if protected_pos and is_t_assistant_managed(protected_pos) and act in {"BUY", "SELL"}:
+            add_execution_block(decision, code, "该持仓为仅T助手管理，默认交易策略不得自动买卖")
             continue
         q = execution_quote(code)
         price = q.get("price") if isinstance(q.get("price"), (int, float)) else None
@@ -5251,39 +6743,25 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
     state["market_decision_context"] = compact_market_ctx
     
-    # 日内亏损预算检查
+    # 日内亏损预算只限制新开仓；已有持仓仍需继续做风控分析和卖出决策。
     budget_exceeded, today_pnl = check_daily_loss_budget(state)
-    if budget_exceeded and not force:
-        decision = {
-            "summary": f"🛑 日内亏损预算触发（今日累计{today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%），暂停当日开仓",
-            "actions": [],
-            "model": "SYSTEM_RISK_BUDGET",
-            "provider": "local_rule",
-            "market_guidance": compact_market_ctx,
-            "decision_intelligence": safe_decision_intelligence_context(enrich_portfolio(state), [], market_strategy_ctx, ""),
-        }
-        state["trading_paused"] = True
-        state["pause_reason"] = f"日内亏损预算({today_pnl:.1f}%)"
-        state["pause_since"] = now_ts()
-        # 触发自优化
+    if budget_exceeded:
+        market_strategy_ctx = dict(market_strategy_ctx)
+        market_strategy_ctx["allow_new_buys"] = False
+        market_strategy_ctx["max_new_buys_per_decision"] = 0
+        market_strategy_ctx["buy_budget_multiplier"] = 0.0
+        market_strategy_ctx["risk_budget_exceeded"] = True
+        market_strategy_ctx["risk_budget_pnl_pct"] = round(today_pnl, 2)
+        budget_note = f"日内亏损预算触发({today_pnl:.1f}% ≤ {DAILY_LOSS_BUDGET_PCT}%)，禁止新开仓，仅允许SELL/HOLD和持仓风控"
+        existing_note = str(market_strategy_ctx.get("session_note") or "").strip()
+        market_strategy_ctx["session_note"] = f"{existing_note}；{budget_note}" if existing_note else budget_note
+        compact_market_ctx = compact_market_strategy_context(market_strategy_ctx)
+        state["market_decision_context"] = compact_market_ctx
         try:
             from self_optimizer import run_optimization
             run_optimization()
-        except Exception: pass
-        log_entry = {
-            "time": now_ts(), "b1_generated_at": generated_at,
-            "trade_allowed": False, "trade_reason": f"日内亏损预算({today_pnl:.1f}%)",
-            "decision": decision, "executed": [],
-            "market_decision_context": compact_market_ctx,
-        }
-        if schedule_slot:
-            log_entry["schedule_slot"] = schedule_slot
-            log_entry["schedule_run_kind"] = schedule_run_kind
-            log_entry["schedule_triggered_at"] = schedule_triggered_at
-        state.setdefault("decision_log", []).append(log_entry)
-        _sync_decision_to_db(log_entry)
-        save_state(state)
-        return {"decision": decision, "executed": [], "portfolio": enrich_portfolio(state)}
+        except Exception:
+            pass
     
     # 自适应参数
     adaptive = get_adaptive_params()
@@ -5419,7 +6897,11 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     save_state(state)
     if executed:
         _notify_trade_executions_safely(executed)
-    return {"decision": decision, "executed": executed, "portfolio": enrich_portfolio(state)}
+    try:
+        t_assistant = run_t_assistant_once(notify=True)
+    except Exception as exc:
+        t_assistant = {"error": f"{type(exc).__name__}: {exc}"}
+    return {"decision": decision, "executed": executed, "portfolio": enrich_portfolio(load_state()), "t_assistant": t_assistant}
 
 
 def resume_trading() -> dict[str, Any]:
@@ -5506,5 +6988,13 @@ def get_dashboard_payload() -> dict[str, Any]:
 if __name__ == "__main__":
     if "--auto-exits" in sys.argv:
         print(json.dumps(run_auto_exits_once(), ensure_ascii=False, indent=2))
+    elif "--holdings-analysis" in sys.argv:
+        notify = HOLDINGS_ANALYSIS_NOTIFY and "--no-notify" not in sys.argv
+        simulate_decision = HOLDINGS_ANALYSIS_SIMULATE_DECISION and "--no-simulate-decision" not in sys.argv
+        print(json.dumps(
+            run_holdings_analysis_once(notify=notify, simulate_decision=simulate_decision),
+            ensure_ascii=False,
+            indent=2,
+        ))
     else:
         print(json.dumps(get_dashboard_payload(), ensure_ascii=False, indent=2))

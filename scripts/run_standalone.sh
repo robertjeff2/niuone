@@ -27,7 +27,7 @@ export DASHBOARD_PORTFOLIO_STATE="${DASHBOARD_PORTFOLIO_STATE:-$DASHBOARD_HOME/c
 export DASHBOARD_CONFIG="${DASHBOARD_CONFIG:-$DASHBOARD_HOME/config.yaml}"
 export DASHBOARD_PUSH_HISTORY_DB="${DASHBOARD_PUSH_HISTORY_DB:-$DASHBOARD_HOME/push_history.db}"
 
-echo "牛牛1号 standalone"
+echo "Jeff小助理 standalone"
 echo "  root:           $ROOT"
 echo "  dashboard home: $DASHBOARD_HOME"
 echo "  listen:         http://$HOST:$PORT"

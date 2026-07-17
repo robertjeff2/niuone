@@ -1,6 +1,6 @@
 <img width="2115" height="744" alt="niuone" src="https://github.com/user-attachments/assets/50dd932a-5af9-441a-b17a-d63a0b6801ac" />
 
-# NiuOne · 牛牛1号
+# NiuOne · Jeff小助理
 
 [简体中文](README.md) | English
 
@@ -39,12 +39,12 @@ When contributing or extending the application, see the [app module architecture
 
 ## System Requirements
 
-| Dependency | Requirement | Purpose |
-|---|---|---|
-| Python | 3.11+ | Run services, task scripts, and local tools |
-| Git | Latest stable release recommended | Download and update the project |
-| Browser | A modern browser such as Chrome, Edge, Safari, or Firefox | Access the local workspace |
-| Network | Access to PyPI is required on the first run | Install Python dependencies |
+| Dependency | Requirement                                               | Purpose                                     |
+| ---------- | --------------------------------------------------------- | ------------------------------------------- |
+| Python     | 3.11+                                                     | Run services, task scripts, and local tools |
+| Git        | Latest stable release recommended                         | Download and update the project             |
+| Browser    | A modern browser such as Chrome, Edge, Safari, or Firefox | Access the local workspace                  |
+| Network    | Access to PyPI is required on the first run               | Install Python dependencies                 |
 
 Node.js 18+ is also required when contributing to the project or running the full validation suite, as it is used to check the JavaScript in the dashboard.
 
@@ -92,12 +92,12 @@ On the first run, NiuOne automatically:
 
 ### Common Startup Options
 
-| Option | Description |
-|---|---|
-| `--port VALUE` | Set and save the dashboard port |
-| `--no-browser` | Do not open a browser automatically after startup |
-| `--skip-install` | Skip the dependency installation check |
-| `--service` | Register and start a long-running service for the current platform |
+| Option           | Description                                                        |
+| ---------------- | ------------------------------------------------------------------ |
+| `--port VALUE`   | Set and save the dashboard port                                    |
+| `--no-browser`   | Do not open a browser automatically after startup                  |
+| `--skip-install` | Skip the dependency installation check                             |
+| `--service`      | Register and start a long-running service for the current platform |
 
 For example, to use port `8877` without opening a browser automatically:
 
@@ -181,12 +181,12 @@ Clicking “Remove” in the upper-right corner of a channel card first disables
 
 “Send test notification” sends only to the channel represented by the current card. It is unaffected by the master notification switch or the channel switch, and it does not save or modify configuration. The test uses unsaved values currently entered in the card first. If a sensitive field is blank, it falls back to the saved Webhook, Bot Token, or signing secret, while the Telegram Chat ID and timeout are validated using the current input. The test message includes “模拟成交，非实盘,” but it does not create an execution record or change cash or positions.
 
-| Channel | Required configuration | Optional configuration | Targets accepted by NiuOne | Setup |
-|---|---|---|---|---|
-| Feishu | Bot Webhook | Signing secret | `https://open.feishu.cn/open-apis/bot/v2/hook/...` or `https://open.larksuite.com/open-apis/bot/v2/hook/...` | [View setup](#feishu) |
-| DingTalk | Bot Webhook | Signing secret | `https://oapi.dingtalk.com/robot/send?access_token=...` | [View setup](#dingtalk) |
-| WeCom | Bot Webhook | None | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...` | [View setup](#wecom) |
-| Telegram | Bot Token, Chat ID | None | NiuOne calls the official `api.telegram.org` Bot API using the Token | [View setup](#telegram) |
+| Channel  | Required configuration | Optional configuration | Targets accepted by NiuOne                                                                                   | Setup                   |
+| -------- | ---------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| Feishu   | Bot Webhook            | Signing secret         | `https://open.feishu.cn/open-apis/bot/v2/hook/...` or `https://open.larksuite.com/open-apis/bot/v2/hook/...` | [View setup](#feishu)   |
+| DingTalk | Bot Webhook            | Signing secret         | `https://oapi.dingtalk.com/robot/send?access_token=...`                                                      | [View setup](#dingtalk) |
+| WeCom    | Bot Webhook            | None                   | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`                                                   | [View setup](#wecom)    |
+| Telegram | Bot Token, Chat ID     | None                   | NiuOne calls the official `api.telegram.org` Bot API using the Token                                         | [View setup](#telegram) |
 
 #### Feishu
 
@@ -231,35 +231,35 @@ If `getUpdates` returns an empty array, first confirm that the target conversati
 
 The settings page writes configuration to the private `.local-data/dashboard.env`. For manual configuration, see [dashboard.env.example](dashboard.env.example). Whether a channel is added or removed is represented by its corresponding `*_NOTIFICATION_ENABLED` switch.
 
-| Purpose | Environment variable | Default |
-|---|---|---|
-| Master notification switch | `DASHBOARD_NOTIFICATION_ENABLED` | `0` |
-| Per-channel request timeout | `DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS` | `5` |
-| Feishu channel switch | `DASHBOARD_FEISHU_NOTIFICATION_ENABLED` | `0` |
-| Feishu Webhook | `DASHBOARD_FEISHU_WEBHOOK_URL` | Empty |
-| Feishu signing secret | `DASHBOARD_FEISHU_SIGNING_SECRET` | Empty |
-| DingTalk channel switch | `DASHBOARD_DINGTALK_NOTIFICATION_ENABLED` | `0` |
-| DingTalk Webhook | `DASHBOARD_DINGTALK_WEBHOOK_URL` | Empty |
-| DingTalk signing secret | `DASHBOARD_DINGTALK_SIGNING_SECRET` | Empty |
-| WeCom channel switch | `DASHBOARD_WECOM_NOTIFICATION_ENABLED` | `0` |
-| WeCom Webhook | `DASHBOARD_WECOM_WEBHOOK_URL` | Empty |
-| Telegram channel switch | `DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED` | `0` |
-| Telegram Bot Token | `DASHBOARD_TELEGRAM_BOT_TOKEN` | Empty |
-| Telegram Chat ID | `DASHBOARD_TELEGRAM_CHAT_ID` | Empty |
+| Purpose                     | Environment variable                      | Default |
+| --------------------------- | ----------------------------------------- | ------- |
+| Master notification switch  | `DASHBOARD_NOTIFICATION_ENABLED`          | `0`     |
+| Per-channel request timeout | `DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS`  | `5`     |
+| Feishu channel switch       | `DASHBOARD_FEISHU_NOTIFICATION_ENABLED`   | `0`     |
+| Feishu Webhook              | `DASHBOARD_FEISHU_WEBHOOK_URL`            | Empty   |
+| Feishu signing secret       | `DASHBOARD_FEISHU_SIGNING_SECRET`         | Empty   |
+| DingTalk channel switch     | `DASHBOARD_DINGTALK_NOTIFICATION_ENABLED` | `0`     |
+| DingTalk Webhook            | `DASHBOARD_DINGTALK_WEBHOOK_URL`          | Empty   |
+| DingTalk signing secret     | `DASHBOARD_DINGTALK_SIGNING_SECRET`       | Empty   |
+| WeCom channel switch        | `DASHBOARD_WECOM_NOTIFICATION_ENABLED`    | `0`     |
+| WeCom Webhook               | `DASHBOARD_WECOM_WEBHOOK_URL`             | Empty   |
+| Telegram channel switch     | `DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED` | `0`     |
+| Telegram Bot Token          | `DASHBOARD_TELEGRAM_BOT_TOKEN`            | Empty   |
+| Telegram Chat ID            | `DASHBOARD_TELEGRAM_CHAT_ID`              | Empty   |
 
 #### Troubleshooting
 
-| Symptom | What to check |
-|---|---|
-| No messages arrive on any channel | Confirm that the master notification switch is enabled, at least one channel has been added and saved, and a simulated execution was successfully persisted. |
-| Only one channel fails | Check that the corresponding channel card is still in the added state and that the Webhook, Token, and Chat ID belong to the same bot and target conversation. |
-| Feishu returns `19024`, or DingTalk reports a keyword mismatch | Add `模拟成交` in the bot's security settings, or adjust its keyword rules. |
-| Feishu returns `19021`, DingTalk returns `310000`, or a signature/timestamp error appears | Copy the original signing secret shown by the platform again and synchronize the system clock on the machine running NiuOne. |
-| Feishu returns `19022`, DingTalk returns `310000`, or an IP-not-allowed error appears | Add the public egress IP of the NiuOne machine to the bot's allowlist. |
-| DingTalk returns `400101`, `400102`, or `400106` | Check that the `access_token` is complete, that the bot is enabled, and that it still belongs to the target group. |
-| Telegram reports `chat not found` or lacks permission to send | Start a conversation with the bot first, or add it to the target group/channel and grant permission to post messages, then verify the Chat ID again. |
-| The settings page rejects the Webhook | Use the official HTTPS URLs listed above. Do not enter an application-bot API, proxy URL, URL containing a username and password, non-default port, or `#fragment`. |
-| A channel is added again after being removed and saved | All fields should show “Not set” and must be entered again. If the credentials may have leaked, revoke or rotate them on the corresponding platform as well. |
+| Symptom                                                                                   | What to check                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No messages arrive on any channel                                                         | Confirm that the master notification switch is enabled, at least one channel has been added and saved, and a simulated execution was successfully persisted.        |
+| Only one channel fails                                                                    | Check that the corresponding channel card is still in the added state and that the Webhook, Token, and Chat ID belong to the same bot and target conversation.      |
+| Feishu returns `19024`, or DingTalk reports a keyword mismatch                            | Add `模拟成交` in the bot's security settings, or adjust its keyword rules.                                                                                         |
+| Feishu returns `19021`, DingTalk returns `310000`, or a signature/timestamp error appears | Copy the original signing secret shown by the platform again and synchronize the system clock on the machine running NiuOne.                                        |
+| Feishu returns `19022`, DingTalk returns `310000`, or an IP-not-allowed error appears     | Add the public egress IP of the NiuOne machine to the bot's allowlist.                                                                                              |
+| DingTalk returns `400101`, `400102`, or `400106`                                          | Check that the `access_token` is complete, that the bot is enabled, and that it still belongs to the target group.                                                  |
+| Telegram reports `chat not found` or lacks permission to send                             | Start a conversation with the bot first, or add it to the target group/channel and grant permission to post messages, then verify the Chat ID again.                |
+| The settings page rejects the Webhook                                                     | Use the official HTTPS URLs listed above. Do not enter an application-bot API, proxy URL, URL containing a username and password, non-default port, or `#fragment`. |
+| A channel is added again after being removed and saved                                    | All fields should show “Not set” and must be entered again. If the credentials may have leaked, revoke or rotate them on the corresponding platform as well.        |
 
 NiuOne attempts to send at most once per enabled channel and does not retry automatically, avoiding duplicate execution alerts if a response is lost. Delivery errors are logged only as warnings and do not change cash, positions, or execution logs.
 

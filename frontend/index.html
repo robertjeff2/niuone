@@ -1,41 +1,72 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>牛牛1号</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=14">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E">
-
-</head>
-<body>
-<section class="compliance-notice" aria-label="非荐股和入市风险提示">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jeff小助理</title>
+    <link rel="stylesheet" href="/static/dashboard.css?v=15" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%AE%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <!-- <section class="compliance-notice" aria-label="非荐股和入市风险提示">
   <div class="compliance-row"><span class="compliance-badge">非荐股提示</span><span class="compliance-text">本页面仅用于个人研究、模拟交易和信息展示，不构成证券、期货投资咨询、投资建议、荐股服务或任何买卖依据；不承诺收益，不代客理财，不收取荐股费用。</span></div>
   <div class="compliance-row"><span class="compliance-badge risk">入市风险提示</span><span class="compliance-text">证券、期货等投资存在本金损失风险，市场有涨有跌；请通过正规持牌机构独立判断、自主决策、风险自担。投资有风险，入市需谨慎。</span></div>
-</section>
-<header>
-  <div class="header-row">
-    <h1>牛牛1号</h1>
-    <div class="header-actions">
-      <a class="header-link" href="https://github.com/kunkundi/niuone" target="_blank" rel="noopener noreferrer" title="开源仓库" aria-label="打开 GitHub 开源仓库">
-        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <path d="M8 0C3.58 0 0 3.67 0 8.2c0 3.62 2.29 6.69 5.47 7.78.4.08.55-.18.55-.4 0-.2-.01-.85-.01-1.55-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.15-.28-.15-.68-.52-.01-.53.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.1-1.78-.21-3.64-.91-3.64-4.03 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.42 7.42 0 0 1 8 3.99c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.29.82 2.19 0 3.13-1.87 3.82-3.65 4.03.29.26.54.75.54 1.51 0 1.1-.01 1.98-.01 2.25 0 .22.15.48.55.4A8.12 8.12 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"/>
-        </svg>
-        <span>GitHub</span>
-      </a>
-      <a class="version-status" id="versionStatus" data-state="checking" href="https://hub.docker.com/r/kunkundi/niuone" target="_blank" rel="noopener noreferrer" title="正在检查 Docker Hub 最新版本" aria-label="正在检查 Docker Hub 最新版本">
-        <span>版本</span><b id="versionValue">--</b>
-      </a>
-      <a class="settings-link" href="/admin" title="进入设置页" aria-label="进入设置页">设置</a>
-      <div class="refresh-pill" title="最后刷新"><span>最后刷新</span><b id="updated">--</b></div>
-    </div>
-  </div>
-  <div id="categoryTabs" class="category-tabs"></div>
-</header>
-<main>
-  <section id="feed" class="feed"><div class="loading">加载中…</div></section>
-</main>
+</section> -->
+    <header>
+      <div class="header-row">
+        <h1>Jeff看大A</h1>
+        <div class="header-actions">
+          <a
+            class="header-link"
+            href="https://github.com/kunkundi/niuone"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="开源仓库"
+            aria-label="打开 GitHub 开源仓库"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path
+                d="M8 0C3.58 0 0 3.67 0 8.2c0 3.62 2.29 6.69 5.47 7.78.4.08.55-.18.55-.4 0-.2-.01-.85-.01-1.55-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.15-.28-.15-.68-.52-.01-.53.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.1-1.78-.21-3.64-.91-3.64-4.03 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.42 7.42 0 0 1 8 3.99c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.29.82 2.19 0 3.13-1.87 3.82-3.65 4.03.29.26.54.75.54 1.51 0 1.1-.01 1.98-.01 2.25 0 .22.15.48.55.4A8.12 8.12 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"
+              />
+            </svg>
+            <span>GitHub</span>
+          </a>
+          <a
+            class="version-status"
+            id="versionStatus"
+            data-state="checking"
+            href="https://hub.docker.com/r/kunkundi/niuone"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="正在检查 Docker Hub 最新版本"
+            aria-label="正在检查 Docker Hub 最新版本"
+          >
+            <span>版本</span><b id="versionValue">--</b>
+          </a>
+          <a
+            class="settings-link"
+            href="/admin"
+            title="进入设置页"
+            aria-label="进入设置页"
+            >设置</a
+          >
+          <div class="refresh-pill" title="最后刷新">
+            <span>最后刷新</span><b id="updated">--</b>
+          </div>
+        </div>
+      </div>
+      <div id="categoryTabs" class="category-tabs"></div>
+    </header>
+    <main>
+      <section id="feed" class="feed">
+        <div class="loading">加载中…</div>
+      </section>
+    </main>
 
-<script src="/static/dashboard.js?v=27" defer></script>
-</body>
+    <script src="/static/dashboard.js?v=30" defer></script>
+  </body>
 </html>

@@ -544,7 +544,7 @@ def write_report_pdf(text: str) -> Path | None:
             else:
                 story.append(Paragraph(inline_markup(raw), normal))
         story.append(Spacer(1, 10))
-        story.append(Paragraph("由牛牛1号自动生成，仅作市场复盘观察，不构成投资建议。", normal))
+        story.append(Paragraph("由Jeff小助理自动生成，仅作市场复盘观察，不构成投资建议。", normal))
         doc = SimpleDocTemplate(str(pdf_path), pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm, title=f"A股{TITLE}")
         doc.build(story)
         if pdf_path.exists() and pdf_path.stat().st_size > 1000:

@@ -63,6 +63,322 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertIn("连续竞价", reason)
 
+    def test_t_assistant_flags_sell_high_opportunity_for_available_holding(self):
+        state = {
+            "cash": 20000.0,
+            "positions": {
+                "600000": {
+                    "name": "测试股",
+                    "qty": 1000,
+                    "avg_cost": 9.8,
+                    "last_price": 10.35,
+                    "prev_close": 10.0,
+                    "day_high": 10.36,
+                    "day_low": 9.98,
+                    "management_mode": "t_assistant",
+                    "buy_date_lots": {"2026-06-23": 1000},
+                }
+            },
+        }
+
+        result = trader.evaluate_t_opportunities(state, datetime(2026, 6, 24, 10, 15))
+
+        self.assertTrue(result["in_window"])
+        self.assertEqual(result["actionable_count"], 1)
+        self.assertEqual(result["t_managed_count"], 1)
+        self.assertTrue(result["items"][0]["managed_by_t_assistant"])
+        self.assertEqual(result["items"][0]["mode"], "sell_high_watch_buyback")
+        self.assertGreaterEqual(result["items"][0]["suggested_shares"], 100)
+
+    def test_t_assistant_blocks_today_locked_holding(self):
+        state = {
+            "cash": 20000.0,
+            "positions": {
+                "600000": {
+                    "name": "测试股",
+                    "qty": 1000,
+                    "avg_cost": 9.8,
+                    "last_price": 10.35,
+                    "prev_close": 10.0,
+                    "day_high": 10.36,
+                    "day_low": 9.98,
+                    "buy_date_lots": {"2026-06-24": 1000},
+                }
+            },
+        }
+
+        result = trader.evaluate_t_opportunities(state, datetime(2026, 6, 24, 10, 15))
+
+        self.assertEqual(result["actionable_count"], 0)
+        self.assertIn("无可卖底仓", result["items"][0]["blockers"][0])
+
+    def test_t_assistant_flags_weak_reverse_t_for_available_holding(self):
+        state = {
+            "cash": 20000.0,
+            "positions": {
+                "600667": {
+                    "name": "太极实业",
+                    "qty": 600,
+                    "avg_cost": 27.66,
+                    "last_price": 20.81,
+                    "prev_close": 22.63,
+                    "day_high": 23.88,
+                    "day_low": 20.64,
+                    "buy_date_lots": {"2026-06-23": 600},
+                }
+            },
+        }
+
+        result = trader.evaluate_t_opportunities(state, datetime(2026, 6, 24, 10, 15))
+
+        self.assertEqual(result["actionable_count"], 1)
+        self.assertEqual(result["items"][0]["mode"], "sell_weak_watch_buyback")
+        self.assertEqual(result["items"][0]["mode_label"], "弱势倒T观察")
+        self.assertGreaterEqual(result["items"][0]["suggested_shares"], 100)
+
+    def test_t_assistant_notification_uses_cooldown_for_duplicate_signature(self):
+        calls = []
+        original = sys.modules.get("notifications")
+
+        class FakeNotification:
+            def __init__(self, event_type, title, text, metadata=None):
+                self.event_type = event_type
+                self.title = title
+                self.text = text
+                self.metadata = metadata or {}
+
+        sys.modules["notifications"] = types.SimpleNamespace(
+            Notification=FakeNotification,
+            dispatch=lambda notification: calls.append(notification) or [types.SimpleNamespace(ok=True)],
+        )
+        state = {}
+        assessment = {
+            'model_analysis': {
+                'status': 'ok',
+                'should_notify': True,
+                'urgency': 'normal',
+                'items': [{'code': '600000', 'verdict': 'act', 'action': 'sell_first'}],
+            },
+            "enabled": True,
+            "generated_at": "2026-06-24 10:15:00",
+            "in_window": True,
+            "summary": "1只可做T观察，0只继续等待",
+            "actionable_count": 1,
+            "note": "仅辅助判断，非自动成交",
+            "items": [{
+                "code": "600000",
+                "name": "测试股",
+                "mode": "sell_high_watch_buyback",
+                "mode_label": "可观察冲高先卖",
+                "change_pct": 3.5,
+                "last_price": 10.35,
+                "available_qty": 1000,
+                "suggested_shares": 300,
+                "trigger": "测试触发",
+                "plan": "测试计划",
+                "invalid_if": "测试失效",
+            }],
+        }
+        try:
+            first = trader.notify_t_assistant_if_needed(state, assessment)
+            second = trader.notify_t_assistant_if_needed(state, assessment)
+        finally:
+            if original is None:
+                sys.modules.pop("notifications", None)
+            else:
+                sys.modules["notifications"] = original
+
+        self.assertTrue(first["notified"])
+        self.assertFalse(second["notified"])
+        self.assertEqual(len(calls), 1)
+
+    def test_t_model_analysis_enforces_hard_blockers_and_confidence(self):
+        assessment = {
+            'generated_at': '2026-06-24 10:15:00',
+            'items': [
+                {
+                    'code': '600000',
+                    'available_qty': 1000,
+                    'suggested_shares': 300,
+                    'blockers': [],
+                },
+                {
+                    'code': '600001',
+                    'available_qty': 0,
+                    'suggested_shares': 0,
+                    'blockers': ['无可卖底仓'],
+                },
+            ],
+        }
+        raw = {
+            'should_notify': True,
+            'summary': '出现机会',
+            'items': [
+                {
+                    'code': '600000',
+                    'verdict': 'act',
+                    'action': 'sell_first',
+                    'confidence': 0.88,
+                    'suggested_shares': 500,
+                    'analysis': '冲高承压',
+                },
+                {
+                    'code': '600001',
+                    'verdict': 'act',
+                    'action': 'sell_first',
+                    'confidence': 0.95,
+                    'suggested_shares': 100,
+                },
+            ],
+        }
+
+        result = trader.normalize_t_model_analysis(raw, assessment)
+
+        rows = {row['code']: row for row in result['items']}
+        self.assertTrue(result['should_notify'])
+        self.assertEqual(rows['600000']['verdict'], 'act')
+        self.assertEqual(rows['600000']['suggested_shares'], 300)
+        self.assertEqual(rows['600001']['verdict'], 'avoid')
+        self.assertIn('无可卖底仓', rows['600001']['rejected_reason'])
+
+    def test_t_assistant_stays_silent_when_model_says_no_action(self):
+        calls = []
+        original = sys.modules.get('notifications')
+        sys.modules['notifications'] = types.SimpleNamespace(
+            Notification=lambda *args, **kwargs: types.SimpleNamespace(),
+            dispatch=lambda notification: calls.append(notification) or [],
+        )
+        assessment = {
+            'enabled': True,
+            'in_window': True,
+            'generated_at': '2026-06-24 10:15:00',
+            'items': [{'code': '600000'}],
+            'model_analysis': {
+                'status': 'ok',
+                'should_notify': False,
+                'items': [{'code': '600000', 'verdict': 'watch', 'action': 'wait'}],
+            },
+        }
+        try:
+            result = trader.notify_t_assistant_if_needed({}, assessment)
+        finally:
+            if original is None:
+                sys.modules.pop('notifications', None)
+            else:
+                sys.modules['notifications'] = original
+
+        self.assertFalse(result['notified'])
+        self.assertEqual(result['reason'], 'model_no_action')
+        self.assertEqual(calls, [])
+
+    def test_t_assistant_does_not_repeat_same_model_signal_after_cooldown(self):
+        calls = []
+        original = sys.modules.get('notifications')
+
+        class FakeNotification:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        sys.modules['notifications'] = types.SimpleNamespace(
+            Notification=FakeNotification,
+            dispatch=lambda notification: calls.append(notification) or [types.SimpleNamespace(ok=True)],
+        )
+        state = {}
+        base = {
+            'enabled': True,
+            'in_window': True,
+            'summary': '模型确认机会',
+            'actionable_count': 1,
+            'items': [{
+                'code': '600000',
+                'name': '测试股',
+                'last_price': 10.3,
+                'change_pct': 3.0,
+                'available_qty': 1000,
+                'suggested_shares': 300,
+                'model_confidence': 0.9,
+                'mode_label': '模型确认：先卖后接',
+            }],
+            'model_analysis': {
+                'status': 'ok',
+                'should_notify': True,
+                'urgency': 'normal',
+                'summary': '模型确认机会',
+                'items': [{'code': '600000', 'verdict': 'act', 'action': 'sell_first'}],
+            },
+        }
+        first_assessment = {**base, 'generated_at': '2026-06-24 10:15:00'}
+        second_assessment = {**base, 'generated_at': '2026-06-24 10:45:00'}
+        second_assessment['items'] = [{**base['items'][0], 'last_price': 10.6, 'change_pct': 6.0}]
+        try:
+            first = trader.notify_t_assistant_if_needed(state, first_assessment)
+            second = trader.notify_t_assistant_if_needed(state, second_assessment)
+        finally:
+            if original is None:
+                sys.modules.pop('notifications', None)
+            else:
+                sys.modules['notifications'] = original
+
+        self.assertTrue(first['notified'])
+        self.assertFalse(second['notified'])
+        self.assertEqual(second['reason'], 'duplicate_signal')
+        self.assertEqual(len(calls), 1)
+
+    def test_t_assistant_runs_model_during_silent_poll(self):
+        state = {
+            'cash': 20000.0,
+            'positions': {
+                '600000': {
+                    'name': '测试股',
+                    'qty': 1000,
+                    'avg_cost': 9.8,
+                    'last_price': 10.35,
+                    'prev_close': 10.0,
+                    'day_high': 10.36,
+                    'day_low': 9.98,
+                    'buy_date_lots': {'2026-06-23': 1000},
+                },
+            },
+            'decision_log': [],
+        }
+        calls = []
+        originals = {
+            'load_state': trader.load_state,
+            'save_state': trader.save_state,
+            'refresh_realtime_prices': trader.refresh_realtime_prices,
+            'refresh_position_intraday': trader.refresh_position_intraday,
+            'call_model_t_assistant_analysis': trader.call_model_t_assistant_analysis,
+        }
+        try:
+            trader.load_state = lambda: state
+            trader.save_state = lambda value: calls.append('save')
+            trader.refresh_realtime_prices = lambda value: None
+            trader.refresh_position_intraday = lambda value: None
+            trader.call_model_t_assistant_analysis = lambda *args: calls.append('model') or {
+                'should_notify': False,
+                'summary': '尚未到时机',
+                'items': [{
+                    'code': '600000',
+                    'verdict': 'watch',
+                    'action': 'wait',
+                    'confidence': 0.8,
+                    'suggested_shares': 0,
+                    'analysis': '等待量价确认',
+                }],
+            }
+            result = trader.run_t_assistant_once(
+                datetime(2026, 6, 24, 10, 15),
+                notify=False,
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertEqual(result['model_analysis']['status'], 'ok')
+        self.assertFalse(result['model_analysis']['should_notify'])
+        self.assertEqual(result['actionable_count'], 0)
+        self.assertEqual(calls, ['model', 'save'])
+
     def test_intraday_minute_rows_are_normalized_to_session_axis(self):
         points = trader.parse_intraday_minute_rows([
             "0925 9.90 10 99",
@@ -1603,6 +1919,315 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("002654", saved["positions"])
         self.assertEqual({row["code"] for row in saved["trade_log"]}, {"002654", "600001"})
         self.assertTrue(any(row["action"] == "SELL" for row in saved["trade_log"]))
+
+    def test_parse_imported_holdings_accepts_chinese_csv_and_merges_duplicates(self):
+        rows = trader.parse_imported_holdings(
+            "股票代码,股票名称,持仓数量,成本价,最新价,策略,备注\n"
+            "600000,浦发银行,1000,8.50,8.72,manual_import,实盘导入\n"
+            "600000,浦发银行,500,9.10,8.80,manual_import,追加导入\n"
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "600000")
+        self.assertEqual(rows[0]["qty"], 1500)
+        self.assertAlmostEqual(rows[0]["avg_cost"], 8.7)
+        self.assertEqual(rows[0]["last_price"], 8.8)
+        self.assertEqual(rows[0]["entry_reason"], "追加导入")
+
+    def test_parse_imported_holdings_accepts_per_position_management_mode(self):
+        rows = trader.parse_imported_holdings(
+            "股票代码,股票名称,持仓数量,成本价,管理模式\n"
+            "600000,浦发银行,1000,8.50,t_assistant\n"
+            "600001,邯郸钢铁,500,5.20,default_strategy\n"
+        )
+
+        self.assertEqual(rows[0]["management_mode"], "t_assistant")
+        self.assertEqual(rows[1]["management_mode"], "default_strategy")
+
+    def test_legacy_manual_import_defaults_to_t_assistant_management(self):
+        self.assertEqual(
+            trader.position_management_mode({"import_source": "manual_holding_import"}),
+            trader.POSITION_MANAGEMENT_T_ASSISTANT,
+        )
+        self.assertEqual(
+            trader.position_management_mode({"buy_strategy": "manual_import"}),
+            trader.POSITION_MANAGEMENT_T_ASSISTANT,
+        )
+        self.assertEqual(
+            trader.position_management_mode({"buy_strategy": "trend_pullback"}),
+            trader.POSITION_MANAGEMENT_DEFAULT,
+        )
+        self.assertEqual(
+            trader.position_management_mode({
+                "import_source": "manual_holding_import",
+                "management_mode": "default_strategy",
+            }),
+            trader.POSITION_MANAGEMENT_DEFAULT,
+        )
+
+    def test_t_assistant_managed_position_ignores_default_sell_rules(self):
+        pos = {
+            "qty": 1000,
+            "avg_cost": 10.0,
+            "last_price": 5.0,
+            "close": 5.0,
+            "buy_strategy": "manual_import",
+            "import_source": "manual_holding_import",
+            "management_mode": "t_assistant",
+            "buy_date_lots": {},
+            "bbi": 9.0,
+            "low10": 8.0,
+        }
+
+        self.assertIsNone(trader.evaluate_sell_signal("600000", pos, "2026-07-17"))
+
+    def test_auto_exit_does_not_liquidate_t_assistant_position(self):
+        original_execution_time = trader.is_a_share_execution_time
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            state = {
+                "cash": 10000.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "浦发银行",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 5.0,
+                        "close": 5.0,
+                        "bbi": 9.0,
+                        "buy_strategy": "manual_import",
+                        "management_mode": "t_assistant",
+                        "buy_date_lots": {},
+                    },
+                },
+                "trade_log": [],
+            }
+
+            executed = trader.check_auto_exits(state, datetime(2026, 7, 17, 10, 15))
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertEqual(state["trade_log"], [])
+
+    def test_execute_actions_blocks_default_strategy_for_t_assistant_position(self):
+        original_execution_time = trader.is_a_share_execution_time
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            state = {
+                "cash": 10000.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "浦发银行",
+                        "qty": 1000,
+                        "avg_cost": 10.0,
+                        "last_price": 5.0,
+                        "buy_strategy": "manual_import",
+                        "management_mode": "t_assistant",
+                        "buy_date_lots": {},
+                    },
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [
+                    {"action": "SELL", "code": "600000", "shares": 1000, "reason": "止损"},
+                    {"action": "BUY", "code": "600000", "shares": 100, "reason": "补仓"},
+                ],
+            }
+
+            executed = trader.execute_actions(state, decision, [], True, "测试")
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertEqual(state["trade_log"], [])
+        self.assertEqual(len(decision["execution_blocked_reasons"]), 2)
+        self.assertIn("仅T助手管理", decision["execution_blocked_reason"])
+
+    def test_manual_import_positions_are_not_reconciled_against_old_trade_log(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 1000,
+                    "avg_cost": 8.5,
+                    "import_source": "manual_holding_import",
+                }
+            },
+            "trade_log": [{
+                "time": "2026-06-25 10:00:00",
+                "action": "BUY",
+                "code": "600000",
+                "shares": 100,
+                "price": 8.5,
+                "reason": "旧模拟买入",
+            }],
+        }
+
+        reconciled = trader.reconcile_positions_with_trade_log(state)
+
+        self.assertEqual(reconciled, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+
+    def test_import_current_holdings_does_not_create_buy_fills(self):
+        original_state_file = trader.STATE_FILE
+        original_refresh = trader.refresh_realtime_prices
+        original_record_equity = trader.record_equity
+        original_sync_decision = trader._sync_decision_to_db
+        original_sync_positions = trader._sync_positions_to_db
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                trader.refresh_realtime_prices = lambda state: {"updated": 0, "quote_time": "2026-06-25 10:00:00"}
+                trader.record_equity = lambda state: None
+                trader._sync_decision_to_db = lambda log: None
+                trader._sync_positions_to_db = lambda state: None
+
+                result = trader.import_current_holdings(
+                    "code,name,qty,avg_cost,last_price\n600000,浦发银行,1000,8.5,8.72",
+                    cash="12345.67",
+                    initial_cash="20000",
+                )
+                state = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+                trader.refresh_realtime_prices = original_refresh
+                trader.record_equity = original_record_equity
+                trader._sync_decision_to_db = original_sync_decision
+                trader._sync_positions_to_db = original_sync_positions
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(state["initial_cash"], 20000)
+        self.assertEqual(state["cash"], 12345.67)
+        self.assertEqual(state["trade_log"], [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 1000)
+        self.assertEqual(state["positions"]["600000"]["import_source"], "manual_holding_import")
+        self.assertEqual(state["positions"]["600000"]["management_mode"], "t_assistant")
+        self.assertEqual(result["management_modes"], {"600000": "t_assistant"})
+        self.assertEqual(trader.available_to_sell(state["positions"]["600000"]), 1000)
+        self.assertEqual(state["decision_log"][-1]["decision"]["model"], "MANUAL_HOLDING_IMPORT")
+
+    def test_replace_import_can_clear_current_holdings(self):
+        original_state_file = trader.STATE_FILE
+        original_refresh = trader.refresh_realtime_prices
+        original_record_equity = trader.record_equity
+        original_sync_decision = trader._sync_decision_to_db
+        original_sync_positions = trader._sync_positions_to_db
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                trader.refresh_realtime_prices = lambda state: {"updated": 0, "quote_time": "2026-06-25 10:00:00"}
+                trader.record_equity = lambda state: None
+                trader._sync_decision_to_db = lambda log: None
+                trader._sync_positions_to_db = lambda state: None
+                trader.save_state({
+                    "initial_cash": 50000.0,
+                    "cash": 24000.0,
+                    "positions": {
+                        "600000": {"code": "600000", "qty": 1000, "avg_cost": 8.5, "last_price": 8.72},
+                    },
+                    "trade_log": [],
+                    "decision_log": [],
+                    "equity_history": [],
+                })
+
+                result = trader.import_current_holdings("", mode="replace", cash="50000", initial_cash="50000")
+                state = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+                trader.refresh_realtime_prices = original_refresh
+                trader.record_equity = original_record_equity
+                trader._sync_decision_to_db = original_sync_decision
+                trader._sync_positions_to_db = original_sync_positions
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(state["positions"], {})
+        self.assertEqual(state["cash"], 50000)
+        self.assertEqual(state["initial_cash"], 50000)
+
+    def test_daily_loss_budget_still_allows_holding_sell_decision(self):
+        original_state_file = trader.STATE_FILE
+        original_execution_time = trader.is_a_share_execution_time
+        original_call_model = trader.call_model_decision
+        original_quote = trader.execution_quote
+        original_sync_decision = trader._sync_decision_to_db
+        original_sync_trades = trader._sync_trades_to_db
+        original_sync_positions = trader._sync_positions_to_db
+        original_record_equity = trader.record_equity
+        original_notify = trader._notify_trade_executions_safely
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+                trader.execution_quote = lambda code: {"price": 10.0, "name": "测试股", "source": "test"}
+                trader._sync_decision_to_db = lambda log: None
+                trader._sync_trades_to_db = lambda items: None
+                trader._sync_positions_to_db = lambda state: None
+                trader.record_equity = lambda state: None
+                trader._notify_trade_executions_safely = lambda items: None
+
+                def fake_model(candidates, portfolio, trade_allowed, trade_reason, market_strategy_ctx=None):
+                    calls.append(dict(market_strategy_ctx or {}))
+                    return {
+                        "summary": "亏损预算下只处理持仓风控",
+                        "actions": [{
+                            "action": "SELL",
+                            "code": "600000",
+                            "name": "测试股",
+                            "shares": 100,
+                            "reason": "持仓亏损扩大，卖出风控",
+                        }],
+                        "model": "test",
+                        "provider": "test",
+                    }
+
+                trader.call_model_decision = fake_model
+                trader.save_state({
+                    "initial_cash": 50000.0,
+                    "cash": 40000.0,
+                    "positions": {
+                        "600000": {
+                            "code": "600000",
+                            "name": "测试股",
+                            "qty": 100,
+                            "avg_cost": 200.0,
+                            "last_price": 100.0,
+                            "prev_close": 200.0,
+                            "buy_date_lots": {},
+                        }
+                    },
+                    "trade_log": [],
+                    "decision_log": [],
+                    "equity_history": [],
+                    "last_b1_generated_at": "",
+                })
+
+                result = trader.run_decision_after_b1({"generated_at": "2026-06-25 10:00:00", "items": []})
+                state = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+                trader.is_a_share_execution_time = original_execution_time
+                trader.call_model_decision = original_call_model
+                trader.execution_quote = original_quote
+                trader._sync_decision_to_db = original_sync_decision
+                trader._sync_trades_to_db = original_sync_trades
+                trader._sync_positions_to_db = original_sync_positions
+                trader.record_equity = original_record_equity
+                trader._notify_trade_executions_safely = original_notify
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["allow_new_buys"])
+        self.assertEqual(calls[0]["max_new_buys_per_decision"], 0)
+        self.assertEqual(result["executed"][0]["action"], "SELL")
+        self.assertEqual(state["positions"], {})
 
     def test_strategy_performance_splits_entry_and_exit_dimensions(self):
         state = {

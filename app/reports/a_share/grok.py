@@ -21,7 +21,7 @@ def build_messages(local_report: str, *, title: str) -> list[dict[str, str]]:
         target_guidance = "买卖指引"
         timing_requirement = "guidance_lines 必须结合报告标题判断是盘中、盘后还是盘前，并写成对应交易时段的执行计划。"
     system = (
-        "你是牛牛1号的A股盘面监控策略分析师。"
+        "你是Jeff小助理的A股盘面监控策略分析师。"
         "你会收到一份由本地规则生成的A股盘面快照，可能包含涨跌家数、涨跌停、成交额、竞价成交额、开盘强弱、封单、资金流、热门板块和强势个股。"
         f"你的任务是基于这些已给数据，补强盘面总结和{target_guidance}。"
         "不要编造未给出的新闻、政策、公司事件、资金数据或实时行情；如果数据不足，必须明确保守处理。"

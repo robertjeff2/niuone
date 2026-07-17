@@ -155,6 +155,7 @@ class TradeNotificationHookTests(unittest.TestCase):
             record_equity=lambda value: None,
             save_state=lambda value: events.append("save"),
             _notify_trade_executions_safely=lambda trades: events.append(("notify", trades)),
+            run_t_assistant_once=lambda notify=True: {},
         ):
             result = trader.run_decision_after_b1({"generated_at": "2026-07-11 10:00:00"}, force=True)
 
@@ -201,6 +202,167 @@ class TradeNotificationHookTests(unittest.TestCase):
 
         self.assertIn("2 个渠道", stderr.getvalue())
         self.assertNotIn(secret, stderr.getvalue())
+
+    def test_manual_cycle_no_fill_sends_result_receipt(self):
+        calls = []
+        original = sys.modules.get("notifications")
+
+        class FakeNotification:
+            def __init__(self, event_type, title, text, metadata=None):
+                self.event_type = event_type
+                self.title = title
+                self.text = text
+                self.metadata = metadata or {}
+
+        sys.modules["notifications"] = types.SimpleNamespace(
+            Notification=FakeNotification,
+            dispatch=lambda notification: calls.append(notification) or [types.SimpleNamespace(ok=True)],
+        )
+        try:
+            results = trader.notify_manual_practice_cycle_result_safely({
+                "decision": {
+                    "summary": "非A股可成交时段，本轮只记录候选，不执行买卖",
+                    "actions": [],
+                },
+                "executed": [],
+                "portfolio": {"cash": 50000.0, "total_equity": 50000.0, "positions": []},
+            })
+        finally:
+            if original is None:
+                sys.modules.pop("notifications", None)
+            else:
+                sys.modules["notifications"] = original
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].event_type, "practice.manual_cycle.no_fill")
+        self.assertIn("未产生 BUY/SELL 模拟成交", calls[0].text)
+
+    def test_manual_cycle_with_fill_does_not_duplicate_trade_notification(self):
+        calls = []
+        original = sys.modules.get("notifications")
+        sys.modules["notifications"] = types.SimpleNamespace(
+            Notification=lambda *args, **kwargs: calls.append(args),
+            dispatch=lambda notification: calls.append(notification) or [types.SimpleNamespace(ok=True)],
+        )
+        try:
+            results = trader.notify_manual_practice_cycle_result_safely({
+                "decision": {"summary": "已成交"},
+                "executed": [sample_sell()],
+            })
+        finally:
+            if original is None:
+                sys.modules.pop("notifications", None)
+            else:
+                sys.modules["notifications"] = original
+
+        self.assertEqual(results, [])
+        self.assertEqual(calls, [])
+
+    def test_holdings_analysis_pushes_result_and_notifies_trade_after_save(self):
+        events = []
+        executed = [sample_sell()]
+        state = {
+            "cash": 1000.0,
+            "positions": {"600000": {"code": "600000", "name": "浦发银行", "qty": 100, "avg_cost": 10.0}},
+            "trade_log": [],
+            "decision_log": [],
+        }
+        portfolio = {
+            "cash": 1000.0,
+            "total_equity": 2050.0,
+            "market_value": 1050.0,
+            "positions": [{
+                "code": "600000",
+                "name": "浦发银行",
+                "qty": 100,
+                "available_qty": 100,
+                "last_price": 10.5,
+                "avg_cost": 10.0,
+                "position_pct": 51.22,
+                "pnl_pct": 5.0,
+            }],
+        }
+        t_assistant = {
+            "generated_at": "2026-07-11 10:00:00",
+            "summary": "持仓分析完成",
+            "items": [],
+        }
+        decision = {
+            "summary": "持仓偏强但先兑现",
+            "actions": [{"action": "SELL", "code": "600000", "name": "浦发银行", "shares": 100, "reason": "测试减仓"}],
+        }
+        with patched(
+            load_state=lambda: state,
+            refresh_realtime_prices=lambda value: None,
+            refresh_position_intraday=lambda value: None,
+            _refresh_position_bbi=lambda value, dt=None: None,
+            enrich_portfolio=lambda value: portfolio,
+            evaluate_t_opportunities=lambda value, dt=None: t_assistant,
+            current_market_strategy_context=lambda: {},
+            compact_market_strategy_context=lambda value: value,
+            is_a_share_execution_time=lambda now=None: (True, "连续竞价交易时段"),
+            call_model_holdings_decision=lambda *args, **kwargs: decision,
+            execute_actions=lambda *args, **kwargs: executed,
+            _sync_decision_to_db=lambda entry: None,
+            _sync_trades_to_db=lambda trades: None,
+            _sync_positions_to_db=lambda value: None,
+            record_equity=lambda value: None,
+            save_state=lambda value: events.append("save"),
+            _notify_holdings_analysis_safely=lambda result: events.append(("holdings_notify", result["executed"])) or [types.SimpleNamespace(ok=True)],
+            _persist_holdings_analysis_message=lambda result, delivery_results=None: events.append(("history", result["decision"]["summary"])) or "1",
+            _notify_trade_executions_safely=lambda trades: events.append(("trade_notify", trades)),
+        ):
+            result = trader.run_holdings_analysis_once(datetime(2026, 7, 11, 10, 0), notify=True, simulate_decision=True)
+
+        self.assertEqual(result["executed"], executed)
+        self.assertEqual(
+            events,
+            [
+                "save",
+                ("holdings_notify", executed),
+                ("history", "持仓偏强但先兑现"),
+                ("trade_notify", executed),
+            ],
+        )
+
+    def test_holdings_analysis_without_simulation_does_not_call_model_or_execute(self):
+        events = []
+        state = {
+            "cash": 1000.0,
+            "positions": {"600000": {"code": "600000", "name": "浦发银行", "qty": 100, "avg_cost": 10.0}},
+            "trade_log": [],
+            "decision_log": [],
+        }
+        portfolio = {
+            "cash": 1000.0,
+            "total_equity": 2050.0,
+            "market_value": 1050.0,
+            "positions": [{"code": "600000", "name": "浦发银行", "qty": 100, "available_qty": 100}],
+        }
+        with patched(
+            load_state=lambda: state,
+            refresh_realtime_prices=lambda value: None,
+            refresh_position_intraday=lambda value: None,
+            _refresh_position_bbi=lambda value, dt=None: None,
+            enrich_portfolio=lambda value: portfolio,
+            evaluate_t_opportunities=lambda value, dt=None: {"summary": "仅观察", "items": []},
+            current_market_strategy_context=lambda: {},
+            compact_market_strategy_context=lambda value: value,
+            is_a_share_execution_time=lambda now=None: (True, "连续竞价交易时段"),
+            call_model_holdings_decision=lambda *args, **kwargs: events.append("model"),
+            execute_actions=lambda *args, **kwargs: events.append("execute"),
+            _sync_decision_to_db=lambda entry: None,
+            record_equity=lambda value: None,
+            save_state=lambda value: events.append("save"),
+            _notify_holdings_analysis_safely=lambda result: [],
+            _persist_holdings_analysis_message=lambda result, delivery_results=None: "1",
+        ):
+            result = trader.run_holdings_analysis_once(datetime(2026, 7, 11, 10, 0), notify=True, simulate_decision=False)
+
+        self.assertFalse(result["simulate_decision"])
+        self.assertEqual(result["executed"], [])
+        self.assertEqual(events, ["save"])
 
 
 if __name__ == "__main__":

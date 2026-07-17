@@ -697,7 +697,7 @@ def build_grok_messages(base_summary: dict[str, Any]) -> list[dict[str, str]]:
     target_us_date = base_summary.get("target_us_date") or ""
     deterministic_hint = "\n".join(str(x) for x in base_summary.get("guidance_lines") or [])
     system = (
-        "你是牛牛1号的隔夜美股盘面策略分析师。"
+        "你是Jeff小助理的隔夜美股盘面策略分析师。"
         "任务是在北京时间交易日早上 08:00，基于已给出的隔夜美股/期货/大宗商品快照，"
         "为 A 股当天一整天的买卖选股策略生成盘面总结。"
         "不要编造未给出的具体新闻、宏观数据或公司事件；如需提到外盘影响，只能基于输入行情。"

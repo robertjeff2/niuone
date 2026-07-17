@@ -41,6 +41,40 @@ function Quote-TaskArgument {
     return '"' + $Value + '"'
 }
 
+function Test-NiuOneAdministrator {
+    $CurrentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $CurrentPrincipal = [System.Security.Principal.WindowsPrincipal]::new($CurrentIdentity)
+    return $CurrentPrincipal.IsInRole(
+        [System.Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+if ($Action -in @("Install", "Restart", "Uninstall") -and -not (Test-NiuOneAdministrator)) {
+    $ElevationArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Quote-TaskArgument $PSCommandPath),
+        "-Action", $Action,
+        "-Root", (Quote-TaskArgument $Root),
+        "-Python", (Quote-TaskArgument $Python),
+        "-LocalDataDir", (Quote-TaskArgument $LocalDataDir),
+        "-EnvFile", (Quote-TaskArgument $EnvFile)
+    )
+    Write-Host "Administrator permission is required. Requesting UAC elevation..."
+    try {
+        $ElevatedProcess = Start-Process `
+            -FilePath $PowerShellExe `
+            -ArgumentList $ElevationArguments `
+            -Verb RunAs `
+            -Wait `
+            -PassThru
+    }
+    catch {
+        throw "Administrator permission was not granted. Accept the UAC prompt and retry."
+    }
+    exit $ElevatedProcess.ExitCode
+}
+
 function New-NiuOneTaskAction {
     param([Parameter(Mandatory = $true)][string]$ServiceName)
     $Arguments = @(

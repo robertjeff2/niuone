@@ -81,6 +81,14 @@ let practiceManualCyclePollTimer = null;
 let practiceMarketSummaryData = {loading:true, available:false, scan_count:0};
 let practiceMarketSummaryGenerating = false;
 let practiceMarketSummaryExpanded = false;
+let practiceImportDialogOpen = false;
+let practiceImportPurpose = 'import';
+let practiceImportText = '';
+let practiceImportCash = '';
+let practiceImportInitialCash = '';
+let practiceImportMode = 'merge';
+let practiceImportManagementMode = 't_assistant';
+let practiceImportStatus = {loading:false, error:'', message:''};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const actionFetch = (url, options = {}) => fetch(url, {
@@ -325,6 +333,59 @@ function renderPracticeRuleNoteModal(note) {
       </div>
       <div class="practice-rule-body">${esc(text)}</div>
     </div>
+  </div>`;
+}
+function renderPracticeImportModal() {
+  if (!practiceImportDialogOpen) return '';
+  const isEdit = practiceImportPurpose === 'edit';
+  const dialogTitle = isEdit ? '编辑当前持仓' : '导入当前持仓';
+  const placeholder = 'code,name,qty,avg_cost,last_price,buy_strategy,entry_reason,management_mode\n600000,浦发银行,1000,8.50,8.72,manual_import,历史套牢持仓,t_assistant';
+  const loading = !!practiceImportStatus.loading;
+  const modeButton = (mode, label) => `<button type="button" class="practice-import-mode-btn ${practiceImportMode === mode ? 'active' : ''}" onclick="setPracticeImportMode('${mode}')" aria-pressed="${practiceImportMode === mode ? 'true' : 'false'}">${label}</button>`;
+  const modeControl = isEdit
+    ? '<div class="practice-import-mode-note">保存后会用下方表格覆盖当前持仓</div>'
+    : `<div class="practice-import-mode" role="group" aria-label="导入模式">
+          ${modeButton('merge', '合并/更新')}
+          ${modeButton('replace', '替换持仓')}
+        </div>`;
+  const managementButton = (mode, label) => `<button type="button" class="practice-import-mode-btn ${practiceImportManagementMode === mode ? 'active' : ''}" onclick="setPracticeImportManagementMode('${mode}')" aria-pressed="${practiceImportManagementMode === mode ? 'true' : 'false'}">${label}</button>`;
+  const managementControl = `<div class="practice-import-management">
+    <div class="practice-import-management-label">未逐行指定时的持仓管理模式</div>
+    <div class="practice-import-mode" role="group" aria-label="持仓管理模式">
+      ${managementButton('t_assistant', '仅 T 助手（推荐）')}
+      ${managementButton('default_strategy', '默认交易策略')}
+    </div>
+    <div class="practice-import-management-help">仅 T 助手：默认策略不能自动买入、止损、止盈或清仓；T 助手继续提供日内做 T 建议，但不会自动成交。</div>
+  </div>`;
+  return `<div class="practice-import-backdrop" role="presentation">
+    <form class="practice-import-card" role="dialog" aria-modal="true" aria-label="${esc(dialogTitle)}" onsubmit="event.preventDefault(); importPracticeHoldings();">
+      <div class="practice-import-head">
+        <div class="practice-import-title">${esc(dialogTitle)}</div>
+        <button type="button" class="practice-import-close" onclick="closePracticeImportDialog()" title="关闭" aria-label="关闭">x</button>
+      </div>
+      <div class="practice-import-body">
+        ${modeControl}
+        ${managementControl}
+        <textarea class="practice-import-textarea" placeholder="${esc(placeholder)}" oninput="practiceImportText=this.value">${esc(practiceImportText)}</textarea>
+        <div class="practice-import-fields">
+          <label class="practice-import-field">
+            <span>导入后现金</span>
+            <input type="number" min="0" step="0.01" value="${esc(practiceImportCash)}" placeholder="不填则保持当前现金" oninput="practiceImportCash=this.value">
+          </label>
+          <label class="practice-import-field">
+            <span>初始资金/本金</span>
+            <input type="number" min="0.01" step="0.01" value="${esc(practiceImportInitialCash)}" placeholder="不填则保持当前初始资金" oninput="practiceImportInitialCash=this.value">
+          </label>
+        </div>
+        <div class="practice-import-hint">${isEdit ? '每行一只持仓；management_mode 可填 t_assistant 或 default_strategy。删除某一行即删除该持仓。' : '支持 CSV/TSV 或 JSON。必填：代码、持仓数量、成本价；导入不会写入模拟 BUY 成交，历史底仓建议使用仅 T 助手。'}</div>
+        ${practiceImportStatus.error ? `<div class="practice-import-error">${esc(practiceImportStatus.error)}</div>` : ''}
+        ${practiceImportStatus.message ? `<div class="practice-import-success">${esc(practiceImportStatus.message)}</div>` : ''}
+        <div class="practice-import-actions">
+          <button type="button" class="practice-import-secondary" onclick="closePracticeImportDialog()" ${loading ? 'disabled' : ''}>关闭</button>
+          <button type="submit" class="practice-import-primary" ${loading ? 'disabled aria-busy="true"' : ''}>${loading ? '保存中...' : (isEdit ? '保存持仓' : '导入')}</button>
+        </div>
+      </div>
+    </form>
   </div>`;
 }
 const upCls = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
@@ -2466,9 +2527,11 @@ function renderPracticePanel() {
     const positionPct = Number.isFinite(totalEquity) && totalEquity > 0 && Number.isFinite(marketValue) ? marketValue / totalEquity * 100 : null;
     const positionText = Number.isFinite(positionPct) ? `${fmtNumber(positionPct)}%` : '--';
     const pnlPctText = Number.isFinite(pnlPct) ? `${pnlPct >= 0 ? '+' : ''}${fmtNumber(pnlPct)}%` : '--';
+    const isTManaged = x.management_mode === 't_assistant';
+    const managementBadge = `<span class="position-management-badge ${isTManaged ? 't-assistant' : 'default-strategy'}">${isTManaged ? '仅 T 助手' : '默认策略'}</span>`;
     if (practicePositionBriefMode) {
       return `<div class="position-brief-card">
-        <div class="position-brief-name">${esc(x.name || x.code || '--')}</div>
+        <div class="position-brief-name">${esc(x.name || x.code || '--')} ${managementBadge}</div>
         <div class="position-brief-stats">
           <div class="position-brief-item"><span>仓位</span><b>${positionText}</b></div>
           <div class="position-brief-item"><span>盈亏</span><b style="color:${c}">${pnlPctText}</b></div>
@@ -2504,8 +2567,9 @@ function renderPracticePanel() {
         </div>`
       : '';
     return `<div class="position-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px">
         <span style="font-weight:700;font-size:16px;color:#f8fafc">${esc(x.code)} ${esc(x.name||'')}</span>
+        ${managementBadge}
       </div>
       <div class="position-metrics">
         <div class="position-metric"><div class="position-label">成本/现价</div><div class="position-value combo">${costPriceText}</div></div>
@@ -2576,6 +2640,7 @@ function renderPracticePanel() {
   const channels = quote.channel_counts || {};
   const ruleNote = p.trade_rule_note || practiceRuleFallbackNote();
   const ruleModal = renderPracticeRuleNoteModal(ruleNote);
+  const importModal = renderPracticeImportModal();
   const channelText = quote.quote_time ? `腾讯${channels.tencent ?? 0}/东财${channels.eastmoney ?? 0}/Sina${channels.sina ?? 0}` : '';
   const singleRetryCount = Math.max(0, Math.trunc(Number(channels.single) || 0));
   const singleRetryText = singleRetryCount ? `，单股重试${singleRetryCount}只` : '';
@@ -2585,7 +2650,7 @@ function renderPracticePanel() {
   const ruleMeta = [`模型：${esc(decisionModel || missingModelLabel)}`, quoteNote].filter(Boolean).join('｜');
   const manualCycle = practiceManualCycleData || {};
   const manualRunning = !!manualCycle.running;
-  const manualButtonText = manualRunning ? (manualCycle.stage_label || '本轮执行中…') : '手动触发选股及买卖策略';
+  const manualButtonText = manualRunning ? (manualCycle.stage_label || '本轮执行中…') : '手动分析持仓 / 盘中全量选股';
   const marketContext = p.market_decision_context || {};
   const marketGuidance = Array.isArray(marketContext.guidance_lines) ? marketContext.guidance_lines.slice(0, 2) : [];
   const marketEvaluation = marketContext.available || marketContext.tone_label
@@ -2594,7 +2659,11 @@ function renderPracticePanel() {
   return `<section class="sector-cloud" style="margin-bottom:18px">
     <div class="practice-account-head">
       <h3>模拟账户</h3>
-      <button type="button" class="practice-manual-cycle-btn" onclick="triggerPracticeManualCycle()" ${manualRunning ? 'disabled aria-busy="true"' : ''}>${manualRunning ? '⏳ ' : '▶ '}${esc(manualButtonText)}</button>
+      <div class="practice-account-actions">
+        <button type="button" class="practice-import-btn" onclick="openPracticeImportDialog()">导入当前持仓</button>
+        <button type="button" class="practice-import-btn" onclick="openPracticeEditDialog()">编辑持仓</button>
+        <button type="button" class="practice-manual-cycle-btn" onclick="triggerPracticeManualCycle()" ${manualRunning ? 'disabled aria-busy="true"' : ''}>${manualRunning ? '⏳ ' : '▶ '}${esc(manualButtonText)}</button>
+      </div>
     </div>
     ${marketEvaluation}
     ${renderPracticeMarketSummary()}
@@ -2622,6 +2691,7 @@ function renderPracticePanel() {
       <span class="practice-rule-meta">${ruleMeta}</span>
     </div>
     ${ruleModal}
+    ${importModal}
     ${p.last_error ? `<div class="empty" style="color:#f87171;margin-top:10px">模型/交易错误：${esc(p.last_error)}</div>` : ''}
   </section>`;
 }
@@ -2946,6 +3016,93 @@ async function triggerPracticeMarketSummary() {
     practiceMarketSummaryData = {...practiceMarketSummaryData, loading:false, error:String(error).replace(/^Error:\s*/, '')};
   } finally {
     practiceMarketSummaryGenerating = false;
+    if (activeCategory === 'practice') renderPracticePage();
+  }
+}
+function openPracticeImportDialog() {
+  const previousPurpose = practiceImportPurpose;
+  practiceImportPurpose = 'import';
+  if (previousPurpose !== 'import') practiceImportText = '';
+  practiceImportManagementMode = 't_assistant';
+  practiceImportDialogOpen = true;
+  practiceImportStatus = {loading:false, error:'', message:''};
+  if (activeCategory === 'practice') renderPracticePage();
+}
+function practiceCsvCell(value) {
+  const text = String(value ?? '');
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function practicePositionsToImportText() {
+  const rows = (niuniuPracticeData && Array.isArray(niuniuPracticeData.positions)) ? niuniuPracticeData.positions : [];
+  const header = ['code', 'name', 'qty', 'avg_cost', 'last_price', 'buy_strategy', 'entry_reason', 'management_mode'];
+  const lines = [header.join(',')];
+  for (const pos of rows) {
+    lines.push([
+      pos.code,
+      pos.name,
+      pos.qty,
+      pos.avg_cost,
+      pos.last_price,
+      pos.buy_strategy,
+      pos.entry_reason,
+      pos.management_mode || 'default_strategy',
+    ].map(practiceCsvCell).join(','));
+  }
+  return lines.join('\n');
+}
+function openPracticeEditDialog() {
+  const p = niuniuPracticeData || {};
+  practiceImportPurpose = 'edit';
+  practiceImportMode = 'replace';
+  practiceImportManagementMode = 't_assistant';
+  practiceImportText = practicePositionsToImportText();
+  practiceImportCash = Number.isFinite(Number(p.cash)) ? String(p.cash) : '';
+  practiceImportInitialCash = Number.isFinite(Number(p.initial_cash)) ? String(p.initial_cash) : '';
+  practiceImportDialogOpen = true;
+  practiceImportStatus = {loading:false, error:'', message:''};
+  if (activeCategory === 'practice') renderPracticePage();
+}
+function closePracticeImportDialog() {
+  if (practiceImportStatus.loading) return;
+  practiceImportDialogOpen = false;
+  practiceImportStatus = {loading:false, error:'', message:''};
+  if (activeCategory === 'practice') renderPracticePage();
+}
+function setPracticeImportMode(mode) {
+  practiceImportMode = mode === 'replace' ? 'replace' : 'merge';
+  if (activeCategory === 'practice') renderPracticePage();
+}
+function setPracticeImportManagementMode(mode) {
+  practiceImportManagementMode = mode === 'default_strategy' ? 'default_strategy' : 't_assistant';
+  if (activeCategory === 'practice') renderPracticePage();
+}
+async function importPracticeHoldings() {
+  if (practiceImportStatus.loading) return;
+  practiceImportStatus = {loading:true, error:'', message:''};
+  renderPracticePage();
+  try {
+    const body = new URLSearchParams({
+      positions_text: practiceImportText,
+      mode: practiceImportPurpose === 'edit' ? 'replace' : practiceImportMode,
+      cash: practiceImportCash,
+      initial_cash: practiceImportInitialCash,
+      management_mode: practiceImportManagementMode,
+      source_note: practiceImportPurpose === 'edit' ? 'dashboard_edit' : 'dashboard_import',
+    });
+    const response = await actionFetch('/api/niuniu_practice/holdings/import', {
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+      body,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.portfolio) {
+      niuniuPracticeData = mergePracticePayloadSnapshots(niuniuPracticeData, payload.portfolio);
+    }
+    practiceImportStatus = {loading:false, error:'', message:`已${practiceImportPurpose === 'edit' ? '保存' : '导入'} ${payload.imported ?? 0} 只持仓`};
+    await loadPracticePage();
+  } catch (error) {
+    practiceImportStatus = {loading:false, error:String(error).replace(/^Error:\s*/, ''), message:''};
+  } finally {
     if (activeCategory === 'practice') renderPracticePage();
   }
 }
@@ -4211,6 +4368,10 @@ document.addEventListener('click', event => {
     if (activeCategory === 'practice') render();
     return;
   }
+  if (practiceImportDialogOpen && event.target.classList && event.target.classList.contains('practice-import-backdrop')) {
+    closePracticeImportDialog();
+    return;
+  }
   const calendarAction = event.target.closest('[data-practice-calendar-action]');
   if (calendarAction) {
     event.preventDefault();
@@ -4286,6 +4447,11 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     practiceRuleNoteOpen = false;
     if (activeCategory === 'practice') render();
+    return;
+  }
+  if (practiceImportDialogOpen && event.key === 'Escape') {
+    event.preventDefault();
+    closePracticeImportDialog();
     return;
   }
   if (practiceCalendarOpen && event.key === 'Escape') {

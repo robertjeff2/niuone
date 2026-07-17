@@ -177,7 +177,7 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(all(call["timeout"] == 7 for call in transport.calls))
 
         message = calls["feishu"]["payload"]["content"]["text"]
-        self.assertIn("牛牛1号模拟成交（2笔）", message)
+        self.assertIn("Jeff小助理模拟成交（2笔）", message)
         self.assertIn("模拟成交，非实盘", message)
         self.assertIn("买入 平安银行(000001)", message)
         self.assertIn("卖出 浦发银行(600000)", message)

@@ -49,6 +49,7 @@ JOBS = (
     Job("DASHBOARD_MARKET_AUCTION_CRON", "25 9 * * 1-5", "8453b3f28cd3", "A股竞价盘前总结", ("a_share_auction_summary.py",), 180),
     Job("DASHBOARD_MARKET_MIDDAY_CRON", "40 11 * * 1-5", "192abba7eeb5", "A股午盘总结", ("a_share_midday_summary.py",), 180),
     Job("DASHBOARD_MARKET_CLOSE_CRON", "10 15 * * 1-5", "67ac98149ead", "A股盘后总结", ("a_share_close_summary.py",), 180),
+    Job("DASHBOARD_HOLDINGS_ANALYSIS_CRON", "45 9,10,11,13,14 * * 1-5", "5f8e1d4b7a21", "持仓周期分析与推送", ("niuniu_practice_trader.py", "--holdings-analysis"), 180),
     Job("DASHBOARD_B3_EXIT_TIME", "37 9 * * 1-5", "f4b8c0ad1a35", "牛牛B3开盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120),
     Job("DASHBOARD_TIME_EXIT_TIME", "45 14 * * 1-5", "fc4f23b79591", "牛牛尾盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120),
     Job("DASHBOARD_US_RATING_CRON", "0 11 * * *", "fd0b807138f4", "每日美股机构买入评级汇报", ("us_rating_report.py", "--store-only"), 300),

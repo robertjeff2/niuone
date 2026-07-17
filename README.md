@@ -1,6 +1,6 @@
 <img width="2115" height="744" alt="niuone" src="https://github.com/user-attachments/assets/50dd932a-5af9-441a-b17a-d63a0b6801ac" />
 
-# NiuOne · 牛牛1号
+# NiuOne · Jeff小助理
 
 简体中文 | [English](README_EN.md)
 
@@ -11,11 +11,11 @@
   <a href="https://hub.docker.com/r/kunkundi/niuone"><img src="https://img.shields.io/docker/pulls/kunkundi/niuone?label=Docker%20Pulls" alt="Docker Pulls" /></a>
 </p>
 
-牛牛1号是一套以 A 股模拟交易为核心，融合行情聚合、策略研究与账户跟踪的智能市场研究工作台。用户可以选择内置策略，也可以用自然语言编写自己的交易策略。
+Jeff小助理是一套以 A 股模拟交易为核心，融合行情聚合、策略研究与账户跟踪的智能市场研究工作台。用户可以选择内置策略，也可以用自然语言编写自己的交易策略。
 
 系统会整合盘前竞价、盘中和盘后行情、资金与板块、隔夜美股、机构评级和关注源信息。这些信息会用于候选筛选、消息面预检和模拟买卖决策。模拟账户会持续记录持仓、盈亏、收益曲线、交易日志，以及每次决策的依据和原因。
 
-牛牛1号可以按计划自动完成信息采集、模拟决策和交易记录归档，并在产生模拟成交后通过飞书、钉钉、企业微信或 Telegram 发送提醒。模拟交易过程会遵循用户配置的交易纪律和风险规则。项目支持在个人电脑或服务器上运行，配置和研究数据由用户自行保存。所有交易都发生在模拟账户中，不连接券商，也不会动用真实资金。
+Jeff小助理可以按计划自动完成信息采集、模拟决策和交易记录归档，并在产生模拟成交后通过飞书、钉钉、企业微信或 Telegram 发送提醒。模拟交易过程会遵循用户配置的交易纪律和风险规则。项目支持在个人电脑或服务器上运行，配置和研究数据由用户自行保存。所有交易都发生在模拟账户中，不连接券商，也不会动用真实资金。
 
 ## 在线演示
 
@@ -39,12 +39,12 @@
 
 ## 系统要求
 
-| 依赖 | 要求 | 用途 |
-|---|---|---|
-| Python | 3.11+ | 运行服务、任务脚本和本地工具 |
-| Git | 推荐最新稳定版 | 获取和更新项目 |
-| 浏览器 | Chrome、Edge、Safari、Firefox 等现代浏览器 | 访问本地工作台 |
-| 网络 | 首次运行需访问 PyPI | 安装 Python 依赖 |
+| 依赖   | 要求                                       | 用途                         |
+| ------ | ------------------------------------------ | ---------------------------- |
+| Python | 3.11+                                      | 运行服务、任务脚本和本地工具 |
+| Git    | 推荐最新稳定版                             | 获取和更新项目               |
+| 浏览器 | Chrome、Edge、Safari、Firefox 等现代浏览器 | 访问本地工作台               |
+| 网络   | 首次运行需访问 PyPI                        | 安装 Python 依赖             |
 
 参与开发或运行完整验证时，还需要 Node.js 18+，用于检查 dashboard 中的 JavaScript。
 
@@ -92,12 +92,12 @@ http://127.0.0.1:8787/
 
 ### 常用启动参数
 
-| 参数 | 说明 |
-|---|---|
-| `--port VALUE` | 设置并保存 dashboard 端口 |
-| `--no-browser` | 启动后不自动打开浏览器 |
-| `--skip-install` | 跳过依赖安装检查 |
-| `--service` | 注册并启动当前平台的长期运行服务 |
+| 参数             | 说明                             |
+| ---------------- | -------------------------------- |
+| `--port VALUE`   | 设置并保存 dashboard 端口        |
+| `--no-browser`   | 启动后不自动打开浏览器           |
+| `--skip-install` | 跳过依赖安装检查                 |
+| `--service`      | 注册并启动当前平台的长期运行服务 |
 
 例如，使用 `8877` 端口且不自动打开浏览器：
 
@@ -181,12 +181,12 @@ NiuOne 支持将模拟买入和卖出成交推送到飞书、钉钉、企业微�
 
 “发送测试通知”只向当前卡片对应的一个渠道发送，不受通知总开关或渠道开关影响，也不会保存或修改配置。测试会优先使用卡片中尚未保存的输入；敏感字段留空时会回退到已经保存的 Webhook、Bot Token 或签名密钥，Telegram Chat ID 和超时则按当前输入验证。测试消息包含“模拟成交，非实盘”，但不会创建成交记录、修改资金或持仓。
 
-| 渠道 | 必填配置 | 可选配置 | NiuOne 接受的目标 | 配置方式 |
-|---|---|---|---|---|
-| 飞书 | 机器人 Webhook | 签名密钥 | `https://open.feishu.cn/open-apis/bot/v2/hook/...` 或 `https://open.larksuite.com/open-apis/bot/v2/hook/...` | [查看配置](#飞书) |
-| 钉钉 | 机器人 Webhook | 签名密钥 | `https://oapi.dingtalk.com/robot/send?access_token=...` | [查看配置](#钉钉) |
-| 企业微信 | 机器人 Webhook | 无 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...` | [查看配置](#企业微信) |
-| Telegram | Bot Token、Chat ID | 无 | NiuOne 根据 Token 调用官方 `api.telegram.org` Bot API | [查看配置](#telegram) |
+| 渠道     | 必填配置           | 可选配置 | NiuOne 接受的目标                                                                                            | 配置方式              |
+| -------- | ------------------ | -------- | ------------------------------------------------------------------------------------------------------------ | --------------------- |
+| 飞书     | 机器人 Webhook     | 签名密钥 | `https://open.feishu.cn/open-apis/bot/v2/hook/...` 或 `https://open.larksuite.com/open-apis/bot/v2/hook/...` | [查看配置](#飞书)     |
+| 钉钉     | 机器人 Webhook     | 签名密钥 | `https://oapi.dingtalk.com/robot/send?access_token=...`                                                      | [查看配置](#钉钉)     |
+| 企业微信 | 机器人 Webhook     | 无       | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`                                                   | [查看配置](#企业微信) |
+| Telegram | Bot Token、Chat ID | 无       | NiuOne 根据 Token 调用官方 `api.telegram.org` Bot API                                                        | [查看配置](#telegram) |
 
 #### 飞书
 
@@ -231,35 +231,35 @@ NiuOne 支持将模拟买入和卖出成交推送到飞书、钉钉、企业微�
 
 设置页会把配置写入私有的 `.local-data/dashboard.env`；如需手工配置，可参考 [dashboard.env.example](dashboard.env.example)。对应的 `*_NOTIFICATION_ENABLED` 开关仅表示渠道是否启用；设置页会根据已保存的渠道配置决定是否显示渠道卡片。
 
-| 作用 | 环境变量 | 默认值 |
-|---|---|---|
-| 通知总开关 | `DASHBOARD_NOTIFICATION_ENABLED` | `0` |
-| 单渠道请求超时 | `DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS` | `5` |
-| 飞书渠道开关 | `DASHBOARD_FEISHU_NOTIFICATION_ENABLED` | `0` |
-| 飞书 Webhook | `DASHBOARD_FEISHU_WEBHOOK_URL` | 空 |
-| 飞书签名密钥 | `DASHBOARD_FEISHU_SIGNING_SECRET` | 空 |
-| 钉钉渠道开关 | `DASHBOARD_DINGTALK_NOTIFICATION_ENABLED` | `0` |
-| 钉钉 Webhook | `DASHBOARD_DINGTALK_WEBHOOK_URL` | 空 |
-| 钉钉签名密钥 | `DASHBOARD_DINGTALK_SIGNING_SECRET` | 空 |
-| 企业微信渠道开关 | `DASHBOARD_WECOM_NOTIFICATION_ENABLED` | `0` |
-| 企业微信 Webhook | `DASHBOARD_WECOM_WEBHOOK_URL` | 空 |
-| Telegram 渠道开关 | `DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED` | `0` |
-| Telegram Bot Token | `DASHBOARD_TELEGRAM_BOT_TOKEN` | 空 |
-| Telegram Chat ID | `DASHBOARD_TELEGRAM_CHAT_ID` | 空 |
+| 作用               | 环境变量                                  | 默认值 |
+| ------------------ | ----------------------------------------- | ------ |
+| 通知总开关         | `DASHBOARD_NOTIFICATION_ENABLED`          | `0`    |
+| 单渠道请求超时     | `DASHBOARD_NOTIFICATION_TIMEOUT_SECONDS`  | `5`    |
+| 飞书渠道开关       | `DASHBOARD_FEISHU_NOTIFICATION_ENABLED`   | `0`    |
+| 飞书 Webhook       | `DASHBOARD_FEISHU_WEBHOOK_URL`            | 空     |
+| 飞书签名密钥       | `DASHBOARD_FEISHU_SIGNING_SECRET`         | 空     |
+| 钉钉渠道开关       | `DASHBOARD_DINGTALK_NOTIFICATION_ENABLED` | `0`    |
+| 钉钉 Webhook       | `DASHBOARD_DINGTALK_WEBHOOK_URL`          | 空     |
+| 钉钉签名密钥       | `DASHBOARD_DINGTALK_SIGNING_SECRET`       | 空     |
+| 企业微信渠道开关   | `DASHBOARD_WECOM_NOTIFICATION_ENABLED`    | `0`    |
+| 企业微信 Webhook   | `DASHBOARD_WECOM_WEBHOOK_URL`             | 空     |
+| Telegram 渠道开关  | `DASHBOARD_TELEGRAM_NOTIFICATION_ENABLED` | `0`    |
+| Telegram Bot Token | `DASHBOARD_TELEGRAM_BOT_TOKEN`            | 空     |
+| Telegram Chat ID   | `DASHBOARD_TELEGRAM_CHAT_ID`              | 空     |
 
 #### 常见问题
 
-| 现象 | 检查项 |
-|---|---|
-| 所有渠道都没有消息 | 确认通知总开关已启用、至少添加并启用了一个渠道，并且确实产生了成功落盘的模拟成交。 |
-| 只有某个渠道失败 | 检查对应渠道是否已启用，以及 Webhook、Token、Chat ID 是否属于同一个机器人和目标会话。 |
-| 飞书 `19024` 或钉钉提示关键词不匹配 | 在机器人安全设置中加入 `模拟成交`，或调整机器人关键词规则。 |
-| 飞书 `19021`、钉钉 `310000` 或提示签名/时间戳错误 | 重新复制平台显示的原始签名密钥，并校准运行 NiuOne 机器的系统时间。 |
-| 飞书 `19022`、钉钉 `310000` 或提示 IP 不允许 | 将 NiuOne 机器的公网出口 IP 加入机器人白名单。 |
-| 钉钉 `400101`、`400102` 或 `400106` | 检查 `access_token` 是否完整、机器人是否启用，以及机器人是否仍属于目标群。 |
-| Telegram 提示 `chat not found` 或无权发送 | 先与机器人开始会话，或将机器人加入目标群组/频道并授予发消息权限，然后重新确认 Chat ID。 |
-| 设置页拒绝 Webhook | 使用上述官方 HTTPS 地址，不要填写应用机器人 API、代理地址、带账号密码的 URL、非默认端口或带 `#fragment` 的地址。 |
-| 移除并保存后再次添加渠道 | 所有字段应显示“未设置”，需要重新填写。若凭据可能泄露，仍应同时在对应平台撤销或轮换。 |
+| 现象                                              | 检查项                                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 所有渠道都没有消息                                | 确认通知总开关已启用、至少添加并启用了一个渠道，并且确实产生了成功落盘的模拟成交。                               |
+| 只有某个渠道失败                                  | 检查对应渠道是否已启用，以及 Webhook、Token、Chat ID 是否属于同一个机器人和目标会话。                            |
+| 飞书 `19024` 或钉钉提示关键词不匹配               | 在机器人安全设置中加入 `模拟成交`，或调整机器人关键词规则。                                                      |
+| 飞书 `19021`、钉钉 `310000` 或提示签名/时间戳错误 | 重新复制平台显示的原始签名密钥，并校准运行 NiuOne 机器的系统时间。                                               |
+| 飞书 `19022`、钉钉 `310000` 或提示 IP 不允许      | 将 NiuOne 机器的公网出口 IP 加入机器人白名单。                                                                   |
+| 钉钉 `400101`、`400102` 或 `400106`               | 检查 `access_token` 是否完整、机器人是否启用，以及机器人是否仍属于目标群。                                       |
+| Telegram 提示 `chat not found` 或无权发送         | 先与机器人开始会话，或将机器人加入目标群组/频道并授予发消息权限，然后重新确认 Chat ID。                          |
+| 设置页拒绝 Webhook                                | 使用上述官方 HTTPS 地址，不要填写应用机器人 API、代理地址、带账号密码的 URL、非默认端口或带 `#fragment` 的地址。 |
+| 移除并保存后再次添加渠道                          | 所有字段应显示“未设置”，需要重新填写。若凭据可能泄露，仍应同时在对应平台撤销或轮换。                             |
 
 NiuOne 对每个启用渠道最多尝试发送一次，不自动重试，以避免响应丢失时产生重复成交提醒。推送错误只记录为告警，不会修改资金、持仓或成交日志。
 

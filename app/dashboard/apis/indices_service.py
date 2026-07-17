@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """indices_dashboard_api.py — 综合指数行情 + 全球夜盘 + 黄金/外汇
-供牛牛1号主服务的 /api/indices 动态导入。
+供Jeff小助理主服务的 /api/indices 动态导入。
 
 输出: {"items": [...], "generated_at": "..."}
 """
